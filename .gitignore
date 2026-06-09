@@ -1,0 +1,8 @@
+# Build artifacts
+*.elf
+*.bin
+*.hex
+*.lst
+*.map
+*.o
+generated_*.ld
