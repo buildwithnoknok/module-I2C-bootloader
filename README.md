@@ -129,3 +129,19 @@ USB-C modules (CH32V203) are out of scope and will need a separate bootloader.
 
 Each module's application must be **relinked at the `0x1000` offset** and reserve
 the top 16 bytes of RAM for the handoff cell. See the design doc for details.
+
+## Flashing a factory / read-protected board
+
+Brand-new CH32V003 chips often ship with **read protection enabled** (RDPR), which
+silently blocks flashing. `minichlink -i` will read the chip ID but show
+`Read protection: enabled`, and writes fail with "nothing connected"-style errors.
+
+Disable protection first (this also mass-erases the chip - fine for a blank board),
+then flash:
+
+    minichlink -p      # disable read protection + mass-erase
+    make flash         # now writes normally
+
+Bench tip: when hand-holding wires to the 5 SWD pads, contact is flaky (3V3 is the
+usual dropout). Run `make flash` in a short retry loop and it catches the moment
+contact is good. Pin grabbers directly on the MCU legs are more reliable than the pads.
