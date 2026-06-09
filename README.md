@@ -8,8 +8,11 @@ This is the firmware foundation for **PoC v2 Step 4** (wireless module OTA). Ful
 design rationale lives in Confluence → *Software Development* → "I²C Module
 Bootloader — Design & Process (PoC v2 Step 4)".
 
-> **Status:** written and compiling (2132 B in a 4 KB region). Not yet flashed or
-> bench-tested on hardware.
+> **Status:** **hardware-validated (Jun 2026).** The full I²C OTA loop is proven on
+> the LED Button board — blank-board first flash, running-app `0xB0` round-trip, and
+> power-loss-mid-flash recovery all pass, with the buzzer and knob daisy-chained on the
+> same bus. Bootloader is 2132 B in the 4 KB region. The buzzer and knob applications
+> are relinked for the bootloader as well.
 
 ## Flash map (16 KB)
 
@@ -60,6 +63,64 @@ make flash      # SWD-flash via WCH-LinkE + minichlink (one-time, per module)
 ```
 
 The custom 4 KB layout is set by `firmware/src/bootloader.ld`.
+
+## Recovery & SWD flashing
+
+The **5-pin SWIO header** (`GND, SWIO, RST, VCC`) is the unbrickable hardware
+backstop. It talks to the RISC-V debug module directly — independent of flash
+contents — so it works even when flash is blank or corrupt. I²C OTA can **never**
+permanently brick a module: the flasher refuses to write below `0x1000` (the
+bootloader's own region) and only writes the validity marker after a full,
+CRC-verified flash, so a failed or interrupted OTA simply leaves the module waiting
+safely in the bootloader at `0x7E`.
+
+Flash-controller addresses use the `0x0800_0000` alias.
+
+### 1. Install / restore the bootloader (the normal recovery)
+
+Run once per blank board, or to recover a module whose **bootloader** got corrupted:
+
+```sh
+cd firmware/src
+make flash        # SWD-flash the bootloader at 0x0800_0000 via WCH-LinkE + minichlink
+```
+
+minichlink whole-erases the chip first, so this also clears any application +
+metadata. On the next boot the bootloader finds no valid app → waits in flash mode at
+`0x7E`. From there, flash the application over I²C from the Pico
+(`module_flasher.py` in `brain-Pico`). **This is the standard way to bring up a blank
+board and to recover from almost any failure.**
+
+### 2. SWD-flash an application directly (skip the Pico)
+
+The application is linked at the `0x1000` offset, so it must be written at flash
+address **`0x0800_1000`** — *not* `0x0800_0000` (that would overwrite the
+bootloader). The bootloader will also only jump to the app once a valid **metadata
+marker** exists at `0x0800_3FC0`, which a bare SWD app-write does not create.
+
+→ In practice, **don't**: use the I²C flasher, which writes the app *and* the
+metadata in one pass. If you only need to get a module running on the bench without
+the Pico, use option 3 instead.
+
+### 3. Bench / last-resort: run an app WITHOUT the bootloader
+
+For bench debugging or a guaranteed-working unit, build the application as a normal
+**full-flash image (linked at `0x0000`)** and SWD-flash it at `0x0800_0000`:
+
+- Build the module's pre-bootloader (standalone) firmware — i.e. with the stock
+  ch32fun linker, *without* the `LINKER_SCRIPT := app.ld` line — and `make flash`.
+- minichlink whole-erases and writes at `0x0800_0000`; the chip runs the app
+  directly, no bootloader, no OTA.
+- To return the module to the OTA system, repeat **option 1** (re-flash the
+  bootloader), then flash the app over I²C.
+
+### Notes
+
+- **SWIO is shared with the status LED (PD1).** The WCH-LinkE drives SWIO during
+  connect/reset; bench-validate that SWD still flashes reliably with the LED fitted on
+  the module (the LED is currently only on the flashing fixture). *(Open item.)*
+- The bootloader never erases or writes its own region, so option 1 is always
+  available as long as the SWIO header is reachable.
 
 ## Compatibility
 
