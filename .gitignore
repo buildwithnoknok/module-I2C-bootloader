@@ -6,3 +6,6 @@
 *.map
 *.o
 generated_*.ld
+
+# ...but keep the released bootloader binary
+!firmware/bin/noknok_bootloader.bin
