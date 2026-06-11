@@ -145,3 +145,15 @@ then flash:
 Bench tip: when hand-holding wires to the 5 SWD pads, contact is flaky (3V3 is the
 usual dropout). Run `make flash` in a short retry loop and it catches the moment
 contact is good. Pin grabbers directly on the MCU legs are more reliable than the pads.
+
+---
+
+## License
+
+- Code: MIT — see [LICENSE](LICENSE).
+
+---
+
+## Safety & Liability
+
+noknok hardware is an electronic device and a DIY/maker kit. You assemble, modify, flash, power, and operate it at your own risk, and it is provided as is, without warranty. See the full notice: [License, Safety & Liability](https://buildwithnoknok.github.io/safety-and-license/).
