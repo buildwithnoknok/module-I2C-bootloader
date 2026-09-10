@@ -41,6 +41,7 @@ FLASH_SIZE   = 0x4000
 STAGE1_BASE  = 0x0300          # execution/file offset
 APP_BASE     = 0x1000
 CTRL_OFF     = 0x3F80
+META_OFF     = 0x3FC0
 WITNESS      = 0x3C00
 CTRL_MAGIC   = 0x6E6B5530
 FLASH_ALIAS  = 0x08000000
@@ -51,12 +52,12 @@ CFLAGS = ('-g -Os -flto -ffunction-sections -fdata-sections -fmessage-length=0 '
           '-I. -I.. -I{cf} -I{cf}/../extralibs -I/usr/include/newlib').format(cf=CH32FUN)
 
 
-def build_fake(stage1_id, out):
+def build_fake(stage1_id, out, ld='fake_stage1.ld'):
     """Compile the fake stage-1 with a given witness ID."""
     elf = out.replace('.bin', '.elf')
     cmd = (f'riscv64-unknown-elf-gcc -o {elf} ../start.S fake_stage1.c '
            f'{CFLAGS} -DSTAGE1_ID={stage1_id:#010x} '
-           f'-T fake_stage1.ld -Wl,--gc-sections')
+           f'-T {ld} -Wl,--gc-sections')
     subprocess.run(cmd, shell=True, cwd=HERE, check=True)
     subprocess.run(f'riscv64-unknown-elf-objcopy -O binary {elf} {out}',
                    shell=True, cwd=HERE, check=True)
@@ -127,12 +128,45 @@ def main():
     place(img, CTRL_OFF,    ctrl,            'control block (marker STILL SET)')
     open(os.path.join(HERE, 'test_recover.bin'), 'wb').write(img)
 
+    # ---- test_chain: the REAL stage-1, not a stub ---------------------------
+    # stage-0 -> real stage-1 -> application. Proves stage-0 hands off correctly
+    # to the actual bootloader, that stage-1 runs from 0x0300, validates the app
+    # against its metadata, and jumps to it. The "app" is the same witness
+    # harness relinked to the app base, so one read confirms the whole chain.
+    s1 = None
+    for cand in ('../../noknok_stage1/noknok_stage1.bin',
+                 '../../../stage1/noknok_stage1.bin'):
+        p = os.path.join(HERE, cand)
+        if os.path.exists(p):
+            s1 = open(p, 'rb').read()
+            break
+
+    if s1 is None:
+        print('\ntest_chain.bin SKIPPED - build stage-1 first')
+    else:
+        assert len(s1) <= APP_BASE - STAGE1_BASE, 'stage-1 overflows its region'
+        app = build_fake(0xA3, 'fake_app.bin', ld='fake_app.ld')
+
+        print('\ntest_chain.bin  (stage-0 -> REAL stage-1 -> app)')
+        img = blank()
+        place(img, 0,           stage0,       'stage-0')
+        place(img, STAGE1_BASE, s1,           'REAL stage-1')
+        place(img, APP_BASE,    app,          'fake app A3')
+        place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
+        meta = struct.pack('<3I', 0xB007C0DE, len(app),
+                           zlib.crc32(app) & 0xffffffff)
+        place(img, META_OFF, meta, 'app metadata')
+        open(os.path.join(HERE, 'test_chain.bin'), 'wb').write(img)
+
     print(f'\nwitness page 0x{WITNESS:04X}:')
     print('  test_jump    -> expect 0xA1  (stage-0 jumped to the installed stage-1)')
     print('  test_update  -> expect 0xA2  (stage-0 applied the pending update)')
     print('  test_recover -> expect 0xA2  (stage-0 redid an interrupted copy)')
-    print(f'stage-0 {len(stage0)} B / {STAGE1_BASE} B budget, '
-          f'A1 {len(a1)} B, A2 {len(a2)} B')
+    if s1 is not None:
+        print('  test_chain   -> expect 0xA3  (stage-0 -> real stage-1 -> app)')
+    print(f'\nstage-0 {len(stage0)} B / {STAGE1_BASE} B budget, '
+          f'A1 {len(a1)} B, A2 {len(a2)} B'
+          + (f', real stage-1 {len(s1)} B' if s1 else ''))
 
 
 if __name__ == '__main__':

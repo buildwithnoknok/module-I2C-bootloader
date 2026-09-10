@@ -226,6 +226,7 @@ single read says *which* stage-1 actually ran. Two builds: `A1` = already instal
 | **Jump path** | stage-0 + A1 installed, no update pending | witness `0xA1` | **PASS** |
 | **Update path** | + A2 staged at `0x1000`, marker set | witness `0xA2`, marker cleared | **PASS** |
 | **Recovery** | stage-1 **half-written**, staging intact, marker still set, witness pre-cleared to `0x00` | witness `0xA2` | **PASS** |
+| **Boot chain** | stage-0 + the **real** stage-1 + a fake app with valid metadata | witness `0xA3` | **PASS** |
 
 Also verified after the update: the stage-1 region is byte-identical to `fake_a2.bin`, and
 the region tail past the image reads `0xFF` — stage-0 rewrites the whole region, leaving
@@ -236,18 +237,55 @@ leaves behind, and stage-0 noticed the update was still pending and simply did t
 copy again. The second half — the part missing after the simulated cut — came back
 byte-identical. **This is DEV-31's core acceptance criterion demonstrated on hardware.**
 
-Still to do: interruption at the *other* three windows in §5 (during staging, during the
-marker write, during the marker clear), and the same exercise on real stage-1 over both
-buses. Those need stage-1's staging support to exist first.
+The boot-chain test is the integration proof: stage-0 hands off to the **real** stage-1 at
+`0x0300`, which runs, validates the application against its metadata, and jumps to it.
 
-## 8. Stage-1 changes required
+**Still to do — needs the Pico I2C rig, not just SWD:**
 
-- Accept a stage-1 image into the staging area (new command; reuses existing transfer).
-- `VERIFY_STAGE1 {len, crc32}` → write the control block only on match, then warm-reset.
-- **`GET_BL_VERSION`** — new, and load-bearing: neither bootloader can currently report a
-  version. The I2C bootloader has none at all; the USB bootloader has `BL_VERSION` in
-  source but no command to read it. Without this the Conductor would be pushing
-  bootloader updates blind. Should report stage-0 presence + stage-1 version.
+- `VERIFY_STAGE1` and `GET_VERSION` exercised over the wire.
+- A real end-to-end stage-1 update driven by the Conductor (`0xB0` → stage a new stage-1 →
+  `VERIFY_STAGE1` → `BOOT` → stage-0 installs → re-push the app).
+- Interruption at the other three windows in §5 (during staging, during the marker write,
+  during the marker clear). Only the mid-copy window is covered so far.
+- The same exercise on the CH32V203 over USB.
+
+## 8. Stage-1 — IMPLEMENTED (10 Sep 2026)
+
+Source: `firmware/stage1/`. Relinked from `0x0000` to `0x0300`, derived from the
+hardware-validated monolithic bootloader; **the application-flashing path is unchanged**.
+Builds to **2596 B in the 3.25 KB region** (732 B free), 96 B RAM.
+
+The design principle for the new commands: **a stage-1 update is the same transfer as an
+application update.** Same `ERASE`, same `WRITE_CHUNK`, same staging area. Only the
+closing command differs, so the host and the Conductor need almost no new machinery:
+
+```
+app update:      ERASE -> WRITE_CHUNK xN -> VERIFY(0x04)        -> BOOT
+stage-1 update:  ERASE -> WRITE_CHUNK xN -> VERIFY_STAGE1(0x06) -> BOOT
+```
+
+| Command | Payload | Action |
+|---|---|---|
+| `0x06 VERIFY_STAGE1` | `[len(4 LE), crc32(4 LE)]` | CRC the staged image; **only on match** write the control block that arms stage-0 |
+| `0xB1 GET_VERSION` | — | next read returns `[BL_PROTOCOL_VERSION, major, minor, patch]` |
+| `0x05 BOOT` | — | **changed:** a pending stage-1 update now outranks booting the app — reset so stage-0 installs it |
+
+Nothing is armed until the CRC matches, so a failed or interrupted transfer simply leaves
+no marker and the module boots the existing stage-1 unchanged.
+
+**`0xB1` was chosen deliberately** to match the application's `GET_VERSION` (DEV-1) — same
+command, same 4-byte shape, so the Conductor can ask anything on the bus for its version.
+There is no ambiguity because the bootloader answers at `0x7E` and apps answer at their
+runtime address. It also gives the fleet discriminator for free: **the old monolithic
+bootloader does not implement `0xB1`, so silence means "old world" and a reply means
+"stage-0/stage-1 module".** Stage-0's presence is implied — if stage-1 is running from
+`0x0300`, something at `0x0000` jumped to it.
+
+Two constants are kept deliberately distinct in stage-1, because conflating them is an
+easy way to corrupt the control block later: `APP_REGION_LEN` (12160 B) bounds what an
+*application* may occupy and stops short of the control block, while `APP_ERASE_LEN`
+(12 KB) is what `ERASE` actually clears, so a fresh image wipes the marker and metadata
+too.
 
 ## 9. CH32V203 (USB modules)
 
