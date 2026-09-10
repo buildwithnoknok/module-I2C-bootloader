@@ -1,31 +1,14 @@
-﻿# Binary assets - never apply line-ending conversion.
-# Without this, core.autocrlf=true corrupts PDFs (and any binary git
-# misdetects as text) on checkout. Verified: a 388495-byte schematic PDF
-# came out of a fresh clone at 414032 bytes.
-*.pdf   binary
-*.zip   binary
-*.epro  binary
-*.png   binary
-*.jpg   binary
-*.jpeg  binary
-*.gif   binary
-*.ico   binary
-*.webp  binary
-*.mp4   binary
-*.woff  binary
-*.woff2 binary
-*.ttf   binary
-*.otf   binary
-*.step  binary
-*.stp   binary
-*.stl   binary
-*.3mf   binary
-*.f3d   binary
-*.bin   binary
-*.hex   binary
-*.elf   binary
-*.uf2   binary
-*.mpy   binary
-*.docx  binary
-*.xlsx  binary
-*.pptx  binary
+# Keep everything LF in the repo and in the working copy.
+#
+# The firmware sources and Makefiles here are pscp'd from this Windows working
+# copy straight to the Pi bench host, and GNU make chokes on a CRLF Makefile.
+# Without this, a Windows checkout silently produces build files the Pi cannot
+# use. Same rule as the factory-flash repo, for the same reason.
+* text=auto eol=lf
+
+# Built images and binaries must never be line-ending translated.
+*.bin binary
+*.hex binary
+*.elf binary
+*.pdf binary
+*.png binary
