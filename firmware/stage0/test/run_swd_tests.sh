@@ -44,6 +44,16 @@ check marker_garbage a1 6e6b5530
 check clear_cut      a2 ffffffff
 [ -f test_chain.bin ] && check chain a3 ffffffff
 
-$M -b >/dev/null 2>&1
 [ $fail = 0 ] && echo 'ALL PASS' || echo 'FAILURES'
+
+# Restore the board. The last test leaves a FAKE app installed that does not
+# enumerate — walking away like that cost a confused Conductor test on 11 Sep.
+# If a full production image is available next to the stage-1 build, flash it.
+RESTORE=../../noknok_stage1/full_stage_ledbutton.bin
+if [ -f "$RESTORE" ]; then
+  $M -w "$RESTORE" flash -b >/dev/null 2>&1 && echo "board restored from $RESTORE"
+else
+  echo "WARNING: board left with the test_chain FAKE app — restore it before I2C work"
+fi
+$M -b >/dev/null 2>&1
 exit $fail

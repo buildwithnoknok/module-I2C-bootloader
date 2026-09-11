@@ -319,10 +319,16 @@ marker stays set because stage-0 never clears one it did not act on (that would 
 unlocking flash on a normal boot). Harmless — stage-1 rewrites the block on the next real
 update — and it means a corrupt marker can never drive an erase.
 
-**Still to do:**
+**Conductor integration — DONE (11 Sep 2026).** `ModuleFlasher` now carries `get_version()`,
+`verify_stage1()`, `wait_for_bootloader_gone()` and the `flash_stage1()` orchestration; the
+Conductor (`noknok.py`) exposes `bootloader_version(entry)` — the fleet discriminator — and
+`stage1_update(entry, stage1_image, app_image=None)`, which replaces stage-1 and re-pushes the
+app in one call. `brain-Pico/software/bench_conductor_stage1.py` is the product-shaped proof:
+enumerate → read version → `stage1_update` with app restore → re-enumerate → read version.
+On the bench: v1.0.1 → v1.0.2, app restored, module back at its runtime address, **9.1 s
+end to end**. USB raises `NotImplementedError` until the CH32V203 port.
 
-- Conductor integration — `noknok.py` needs a `stage1_update()` alongside `update_module()`,
-  using `bench_stage1.py`'s two new commands and the disappear-then-reappear wait.
+**Still to do:**
 - The same exercise on the CH32V203 over USB.
 
 ## 8. Stage-1 — IMPLEMENTED (10 Sep 2026)
