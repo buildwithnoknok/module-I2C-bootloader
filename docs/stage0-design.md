@@ -366,11 +366,12 @@ end to end**. USB raises `NotImplementedError` until the CH32V203 port.
 **Still to do:**
 - The same exercise on the CH32V203 over USB.
 
-## 8. Stage-1 — IMPLEMENTED (10 Sep 2026)
+## 8. Stage-1 — IMPLEMENTED (10 Sep 2026; hardened 11 Sep)
 
 Source: `firmware/stage1/`. Relinked from `0x0000` to `0x0400`, derived from the
 hardware-validated monolithic bootloader; **the application-flashing path is unchanged**.
-Builds to **2600 B in the 3 KB region** (472 B free), 96 B RAM.
+Builds to **2876 B in the 3 KB region** (196 B free), 96 B RAM, after hardening C/D/E
+below (it was 2600 B before).
 
 The design principle for the new commands: **a stage-1 update is the same transfer as an
 application update.** Same `ERASE`, same `WRITE_CHUNK`, same staging area. Only the
@@ -383,12 +384,65 @@ stage-1 update:  ERASE -> WRITE_CHUNK xN -> VERIFY_STAGE1(0x06) -> BOOT
 
 | Command | Payload | Action |
 |---|---|---|
-| `0x06 VERIFY_STAGE1` | `[len(4 LE), crc32(4 LE)]` | CRC the staged image; **only on match** write the control block that arms stage-0 |
+| `0x06 VERIFY_STAGE1` | `[len(4 LE), crc32(4 LE)]` | CRC the staged image **and check its header** (hardening E); **only on both** write the control block (with its descriptor CRC, hardening A) that arms stage-0 |
 | `0xB1 GET_VERSION` | — | next read returns `[BL_PROTOCOL_VERSION, major, minor, patch]` |
+| `0xB3 GET_UID` | — | **hardening D:** next read returns the 8-byte chip UID, same bytes/order as the app's enumeration reply |
 | `0x05 BOOT` | — | **changed:** a pending stage-1 update now outranks booting the app — reset so stage-0 installs it |
+
+New error codes on `READ_STATUS`: **7** = app unhealthy, stage-1 refused to boot it after
+three failed attempts (hardening C — set at boot, cleared by the next command); **8** =
+`VERIFY_STAGE1` refused the staged image because it is not a stage-1 for this layout.
 
 Nothing is armed until the CRC matches, so a failed or interrupted transfer simply leaves
 no marker and the module boots the existing stage-1 unchanged.
+
+### Hardening C — the app boot-attempt counter
+
+The most likely field failure is not a bootloader fault at all: an **application with a
+valid CRC that crashes or hangs**. Stage-1 verified it at write time, so it boots it; it
+dies; power-cycle → CRC still valid → boots it again. The only ways into flash mode were
+`0xB0` (needs a working app) or a *bad* CRC. Dead until SWD.
+
+Now `jump_to_app()` counts every jump in no-init RAM (`0x200007F8`, next to the handoff cell
+in the 16 B every linker reserves). The app clears the cell the moment its I2C address is
+assigned — enumeration completed, so I2C demonstrably works. A fresh app install (`VERIFY`)
+resets it. On the boot path, a valid app whose counter has reached **3** is not booted:
+stage-1 parks in flash mode with `last_error = 7`. Needs every app to run the IWDG so a hang
+becomes a warm reset (LED Button v2.3, Buzzer v3.4.0, Knob v2.2.0, Display v0.4.0 do). A
+`0xB0` reset never counts. Cold power-on randomises the cell → three fresh tries, which is
+right for a transient.
+
+**Bench (`bad_app.c` — valid CRC, starts the IWDG, hangs):** witness `FF BA BA BA FF` — ran
+on attempts 1, 2, 3, never a fourth; then `0x7E` answered `[3, 7]`.
+
+### Hardening D — `GET_UID`, and the Conductor's rescue path
+
+A parked module does not enumerate, so nothing in the Conductor would ever see it — and
+stage-1 cannot say what *type* of module it is. It can say its chip UID. `0xB3` returns the
+same 8 bytes, in the same order, as the app's enumeration reply, so
+`Conductor.rescue_parked_module()` (run **before** `enumerate()`) can probe `0x7E`, read the
+UID, look it up in `noknok_state.json`, fetch that type's app, and push it. Doing this first
+also keeps "one module in the bootloader at a time" true in practice.
+
+**Found on the way:** the Conductor's `_save_state()` *replaced* the state file with the
+current registry, so one enumeration with a module parked wiped its entry and the rescue
+reported "unknown UID" for the very module it exists to rescue. Now merges. **Bench:** parked
+by the bad app → enumerated with it parked (entry survived) → rescued by UID → back at
+`0x09`.
+
+### Hardening E — the image header
+
+A 16-byte header `{"NKS1", base, layout, version}` sits at a **fixed** `+0x100` from the
+image base (just past the 248-byte vector table), placed by `stage1.ld`. `VERIFY_STAGE1`
+reads the same offset in the staged image and refuses (error 8) unless magic, base
+(`0x0400`) and layout (1) all match. This closes the "wrong file" failure: the host computes
+the CRC over whatever it was given, so a valid CRC alone proves nothing about *what* it is.
+**Bench:** a 3000-byte valid-CRC blob with no header → error 8, control block untouched.
+
+Linker gotcha caught on the first build: `AT>FLASH` on a section with an explicit VMA
+continues the *load* address from the previous section, so the header landed at file
+offset `0xF8` while the check reads `0x100`. Now an explicit `AT()` and a `LOADADDR`
+`ASSERT`; the vector table is also asserted to stay under `0x100`.
 
 **`0xB1` was chosen deliberately** to match the application's `GET_VERSION` (DEV-1) — same
 command, same 4-byte shape, so the Conductor can ask anything on the bus for its version.
