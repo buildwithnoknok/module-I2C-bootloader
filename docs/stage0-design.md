@@ -40,8 +40,8 @@ works for USB (where a receiver would mean carrying a whole USB stack in the fro
 
 | Region | Address | Size | Written by | Mutable in field |
 |---|---|---|---|---|
-| **Stage-0** | `0x0000` | 1 KB (500 B used) | SWD, once at manufacture | **Never** |
-| **Stage-1** | `0x0400` | 3 KB (2600 B used) | stage-0, from staging | Yes |
+| **Stage-0** | `0x0000` | 1 KB (704 B used) | SWD, once at manufacture | **Never** |
+| **Stage-1** | `0x0400` | 3 KB (2612 B used) | stage-0, from staging | Yes |
 | **Application** | `0x1000` | 12 KB − 128 B | stage-1, over the bus | Yes |
 | **BL control block** | `0x3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Yes |
 | **App metadata** | `0x3FC0` | 64 B | stage-1 | Yes |
@@ -73,7 +73,7 @@ at a different base. The permanent floor is stage-0's own 1 KB.
 | 2 | `staging_len` | length in bytes |
 | 3 | `staging_crc32` | zlib CRC32, verified by stage-1 *before* the marker is written |
 | 4 | `app_base` | application base address — read by stage-0, never assumed |
-| 5 | `stage1_len` | current stage-1 length (informational / `GET_BL_VERSION`) |
+| 5 | `desc_crc32` | zlib CRC32 over words 0–4 — **stage-0 gate 1** (hardening A, 11 Sep) |
 
 Any value in word 0 other than the exact magic means "no update pending". That is the
 fail-safe direction: a half-written marker reads as garbage → treated as no update →
@@ -81,12 +81,40 @@ stage-0 jumps to a stage-1 it has not touched.
 
 ## 4. Boot decision (stage-0, every reset)
 
-1. Read the control block. If `update_magic` matches **and** the staging descriptor is
-   sane → **apply the stage-1 update** (§5), then reset.
+1. Read the control block. If `update_magic` matches, the update path opens — but
+   **nothing is unlocked until three gates pass**, cheapest first:
+   1. **Descriptor CRC** — words 0–4 must match word 5. A corrupt or half-written marker
+      is rejected here.
+   2. **Geometry** — `app_base` above stage-1 and inside flash, page-aligned; `len` fits
+      the region; staging lies entirely below the control block.
+   3. **Staged image CRC** — stage-0 recomputes CRC32 over `(staging, len)` and requires
+      it to equal word 3. Stage-1 verified the image before writing the marker, but the
+      frozen part does not get to *trust* the updatable part.
+   All three pass → **apply the stage-1 update** (§5), then reset. Any gate fails → fall
+   through as if no update were pending; the marker is left set (clearing it would mean
+   unlocking flash on a normal boot) and stage-1 rewrites it on the next real update.
 2. Else if stage-1's first word is not `0xFFFFFFFF` → **jump to stage-1** at `0x0400`.
-3. Else → no stage-1 was ever programmed. Signal on the status LED and halt; SWD
-   recovery required. This state is reachable only by a factory error, never by a field
-   event.
+3. Else → no stage-1 was ever programmed. Halt; SWD recovery required. This state is
+   reachable only by a factory error, never by a field event.
+
+**Why the CRC in stage-0 after all.** The first design left CRC32 out of stage-0 ("detection
+without recovery"). That was right for checking the *installed* stage-1 on every boot — there
+is nothing to fall back to. It was wrong for checking the *staged* image before erasing:
+that is prevention, and the recovery is trivial (don't erase; boot the old one). Before
+hardening A, a descriptor could be constructed that passed every geometry check and would
+have erased most of flash and installed 64 bytes of junk. Now a corrupt marker, a bit-flip
+in `app_base`, a stage-1 bug, or staging corruption after the marker was written can never
+make the frozen component erase the bootloader region. Cost: ~130 B, one CRC routine used
+twice.
+
+**Install failure retries by reset (hardening B).** If a page will not take after its
+per-page retries — most plausibly a brownout, flash programming being the highest-current
+thing the chip does — stage-0 counts the attempt in no-init RAM (`0x200007F4`, in the 16 B
+every linker reserves above the stack, next to the handoff cell) and resets. The marker is
+still set, so the next boot redoes the install on cleaner power. After **4** consecutive
+warm-reset attempts it halts. A cold power-on randomises the cell, which reads as "fresh",
+so a user power-cycle always gets a full new set of attempts. The update path also waits
+~50 ms before its first flash access (DEV-12's brownout lesson); a normal boot never waits.
 
 Stage-0 does **not** look at the app, the handoff cell, or the app's CRC — all of that
 stays stage-1's job. Keeping the two strictly separated is what holds stage-0 small.
@@ -167,9 +195,13 @@ This costs roughly 30 bytes and makes the entire class of failure a non-event.
 **Open item:** re-run the probe on pigtail power. If the transients persist there, this
 design needs revisiting before the production batch is programmed.
 
-## 7. Stage-0 size — MEASURED (10 Sep 2026)
+## 7. Stage-0 size — MEASURED (10 Sep 2026; hardened 11 Sep)
 
-**Stage-0 is implemented and measures 500 B.** Source: `firmware/stage0/`.
+**Stage-0 is implemented and measures 704 B** after hardening A + B (it was 500 B before
+CRC32 and retry-by-reset were added — +204 B for a CRC routine used twice, the attempt
+counter, and the settle delay). 320 B of the 1 KB reservation remain. Source:
+`firmware/stage0/`. The size history below is the pre-hardening build, kept because the
+lesson in it still applies.
 
 The first build came out at **936 B** — nearly double the estimate — and the reason is
 worth recording: **248 B of it was `ch32fun.c`**, which contributes a full 38-entry
@@ -191,9 +223,10 @@ we can never patch, every symbol we don't link is one that can't surprise us lat
 | RAM | **0 B** |
 
 Excluded to hold the budget: clock/PLL setup (flash programming is fine at the
-reset-default HSI), interrupts and NVIC, any bus stack, an LED, and CRC32 — the marker
-state machine plus a blank check gives the recovery guarantee, and CRC in stage-0 would
-buy detection without recovery.
+reset-default HSI), interrupts and NVIC, any bus stack, and an LED. CRC32 was *originally*
+excluded too, on the reasoning that checking the installed stage-1 would be detection
+without recovery — that reasoning was right for that use and wrong for verifying the staged
+image before erasing, so hardening A brought it in (§4).
 
 Stage-0 uses **zero RAM** — all state is locals. `start.S` therefore does not copy `.data`
 or zero `.bss`, and `stage0.ld` **ASSERTs both are empty** so a future edit that
@@ -303,7 +336,7 @@ failures, zero hangs**. Combined with 10 Sep that is 2432 erases with exactly on
 in the very first four attempts ever, never repeated. Closed as an early bench transient;
 stage-0's verify-and-retry covers the class regardless.
 
-**All four power-loss windows proven (11 Sep 2026, SWD-simulated, `run_swd_tests.sh` — 8/8):**
+**All four power-loss windows proven, plus the two hardening-A attacks (11 Sep 2026, SWD-simulated, `run_swd_tests.sh` — 10/10):**
 
 | Test | Simulates | Witness | Marker after |
 |---|---|---|---|
@@ -312,6 +345,8 @@ stage-0's verify-and-retry covers the class regardless.
 | `marker_garbage` | marker write cut *after* the magic — descriptor all FF | A1 | **left set** (rejected as insane; documented) |
 | `recover` | cut mid-copy: stage-1 half-written | A2 (new) | FF |
 | `clear_cut` | cut during marker clear: copy complete, marker still set | A2 | FF |
+| `desc_badcrc` | **hardening A, gate 1**: geometrically perfect descriptor, wrong descriptor CRC | A1 | **left set** (rejected) |
+| `stage_corrupt` | **hardening A, gate 3**: perfect control block, one byte of the staged image flipped | A1 | **left set** (rejected) |
 
 `marker_garbage` is the one that matters most: to a naive implementation it *looks* like a
 pending update. Stage-0's descriptor sanity check rejects it and boots the old stage-1; the

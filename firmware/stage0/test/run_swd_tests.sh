@@ -15,6 +15,8 @@
 #   marker_garbage  A1   marker 6E6B5530  magic OK but descriptor insane -> rejected,
 #                                         marker deliberately LEFT SET (documented)
 #   clear_cut       A2   marker FF        copy was complete, marker set -> redone, cleared
+#   desc_badcrc     A1   marker 6E6B5530  hardening A gate 1: descriptor CRC wrong -> rejected
+#   stage_corrupt   A1   marker 6E6B5530  hardening A gate 3: staged image CRC wrong -> rejected
 #   chain           A3   marker FF        stage-0 -> real stage-1 -> app
 #
 # Run from the Pi in the test dir after build_test_images.py.
@@ -42,6 +44,8 @@ check stage_cut      a1 ffffffff
 check marker_nomagic a1 ffffffff
 check marker_garbage a1 6e6b5530
 check clear_cut      a2 ffffffff
+check desc_badcrc    a1 6e6b5530
+check stage_corrupt  a1 6e6b5530
 [ -f test_chain.bin ] && check chain a3 ffffffff
 
 [ $fail = 0 ] && echo 'ALL PASS' || echo 'FAILURES'

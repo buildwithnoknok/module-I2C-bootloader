@@ -265,6 +265,10 @@ static void flash_write_ctrl(uint32_t len, uint32_t crc)
     words[2] = len;
     words[3] = crc;
     words[4] = APP_BASE_FLASH;    /* app_base — bounds the stage-1 region */
+    /* Descriptor CRC over words 0-4 (the 20 bytes as they sit in flash).
+     * Stage-0 recomputes this and refuses the update on mismatch, so a
+     * corrupt or half-written control block can never drive an erase. */
+    words[5] = crc32_buf((const uint8_t *)words, 20);
     flash_erase_64(CTRL_FLASH);   /* 64 B erase leaves metadata alone */
     flash_program_page(CTRL_FLASH, words);
 }

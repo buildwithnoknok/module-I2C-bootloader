@@ -65,6 +65,15 @@ def build_fake(stage1_id, out, ld='fake_stage1.ld'):
         return f.read()
 
 
+def ctrl_block(magic, staging, length, crc, app_base, desc_crc=None):
+    """Pack a control block. desc_crc defaults to the correct CRC32 over words
+    0-4 (what stage-1 writes); pass a wrong value to test gate 1."""
+    head = struct.pack('<5I', magic, staging, length, crc, app_base)
+    if desc_crc is None:
+        desc_crc = zlib.crc32(head) & 0xffffffff
+    return head + struct.pack('<I', desc_crc)
+
+
 def blank():
     return bytearray(b'\xff' * FLASH_SIZE)
 
@@ -97,20 +106,19 @@ def main():
     place(img, STAGE1_BASE, a1,     'fake stage-1 A1')
     open(os.path.join(HERE, 'test_jump.bin'), 'wb').write(img)
 
+    # A correct control block: what stage-1 writes after a verified transfer.
+    # Words 0-4 plus the descriptor CRC in word 5 (stage-0 gate 1).
+    a2_crc = zlib.crc32(a2) & 0xffffffff
+    ctrl = ctrl_block(CTRL_MAGIC, FLASH_ALIAS + APP_BASE, len(a2), a2_crc,
+                      FLASH_ALIAS + APP_BASE)
+
     # ---- test_update: A2 staged in the app region + a valid control block --
     print('\ntest_update.bin')
     img = blank()
     place(img, 0,           stage0, 'stage-0')
     place(img, STAGE1_BASE, a1,     'fake stage-1 A1')
     place(img, APP_BASE,    a2,     'staged stage-1 A2')
-
-    ctrl = struct.pack('<5I',
-                       CTRL_MAGIC,                 # update pending
-                       FLASH_ALIAS + APP_BASE,     # staging_addr
-                       len(a2),                    # stage1_len
-                       zlib.crc32(a2) & 0xffffffff,# stage1_crc32 (stage-1's job)
-                       FLASH_ALIAS + APP_BASE)     # app_base
-    place(img, CTRL_OFF, ctrl, 'control block')
+    place(img, CTRL_OFF,    ctrl,   'control block')
     open(os.path.join(HERE, 'test_update.bin'), 'wb').write(img)
 
     # ---- test_recover: what a power cut MID-COPY actually leaves behind -----
@@ -154,9 +162,8 @@ def main():
     place(img, STAGE1_BASE, a1,           'installed stage-1 A1')
     place(img, APP_BASE,    a2,           'fully staged A2')
     place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
-    nomagic = struct.pack('<5I', 0xFFFFFFFF,
-                          FLASH_ALIAS + APP_BASE, len(a2),
-                          zlib.crc32(a2) & 0xffffffff, FLASH_ALIAS + APP_BASE)
+    nomagic = ctrl_block(0xFFFFFFFF, FLASH_ALIAS + APP_BASE, len(a2), a2_crc,
+                         FLASH_ALIAS + APP_BASE)
     place(img, CTRL_OFF, nomagic, 'control block: magic FF, rest valid')
     open(os.path.join(HERE, 'test_marker_nomagic.bin'), 'wb').write(img)
 
@@ -172,10 +179,39 @@ def main():
     place(img, STAGE1_BASE, a1,           'installed stage-1 A1')
     place(img, APP_BASE,    a2,           'fully staged A2')
     place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
-    garbage = struct.pack('<5I', CTRL_MAGIC, 0xFFFFFFFF, 0xFFFFFFFF,
-                          0xFFFFFFFF, 0xFFFFFFFF)
+    garbage = struct.pack('<6I', CTRL_MAGIC, 0xFFFFFFFF, 0xFFFFFFFF,
+                          0xFFFFFFFF, 0xFFFFFFFF, 0xFFFFFFFF)
     place(img, CTRL_OFF, garbage, 'control block: magic OK, descriptor FF')
     open(os.path.join(HERE, 'test_marker_garbage.bin'), 'wb').write(img)
+
+    # ---- Hardening A, gate 1: a descriptor that is geometrically PERFECT but
+    # whose own CRC is wrong. Before hardening A this would have passed every
+    # check and installed. Expect: rejected -> A1, marker left set.
+    print('\ntest_desc_badcrc.bin  (perfect descriptor, wrong descriptor CRC)')
+    img = blank()
+    place(img, 0,           stage0,       'stage-0')
+    place(img, STAGE1_BASE, a1,           'installed stage-1 A1')
+    place(img, APP_BASE,    a2,           'fully staged A2')
+    place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
+    badcrc = ctrl_block(CTRL_MAGIC, FLASH_ALIAS + APP_BASE, len(a2), a2_crc,
+                        FLASH_ALIAS + APP_BASE, desc_crc=0x12345678)
+    place(img, CTRL_OFF, badcrc, 'control block: valid, desc CRC wrong')
+    open(os.path.join(HERE, 'test_desc_badcrc.bin'), 'wb').write(img)
+
+    # ---- Hardening A, gate 3: a perfect control block, but the STAGED IMAGE is
+    # corrupt — one byte flipped in the middle. Stage-1 would never have written
+    # this marker, so this simulates staging corruption after the fact, or a
+    # stage-1 bug. Before hardening A stage-0 would have installed the corrupt
+    # image. Expect: staged CRC mismatch -> rejected -> A1, marker left set.
+    print('\ntest_stage_corrupt.bin  (perfect control block, one byte of staging flipped)')
+    img = blank()
+    place(img, 0,           stage0,       'stage-0')
+    place(img, STAGE1_BASE, a1,           'installed stage-1 A1')
+    a2_bad = bytearray(a2); a2_bad[len(a2)//2] ^= 0xFF
+    place(img, APP_BASE,    bytes(a2_bad), 'staged A2 with one byte flipped')
+    place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
+    place(img, CTRL_OFF,    ctrl,         'control block (CRC is for the GOOD A2)')
+    open(os.path.join(HERE, 'test_stage_corrupt.bin'), 'wb').write(img)
 
     # Window 4 — cut during the MARKER CLEAR: the copy finished (stage-1 == A2)
     # but the marker is still fully set. Expect: stage-0 redoes the copy (A2 ->
@@ -227,6 +263,8 @@ def main():
     print('  test_marker_nomagic -> expect 0xA1  (magic missing: not pending)')
     print('  test_marker_garbage -> expect 0xA1  (magic OK, descriptor insane: rejected)')
     print('  test_clear_cut      -> expect 0xA2  (marker still set: copy redone, harmless)')
+    print('  test_desc_badcrc    -> expect 0xA1  (gate 1: descriptor CRC wrong -> rejected)')
+    print('  test_stage_corrupt  -> expect 0xA1  (gate 3: staged image CRC wrong -> rejected)')
     if s1 is not None:
         print('  test_chain   -> expect 0xA3  (stage-0 -> real stage-1 -> app)')
     print(f'\nstage-0 {len(stage0)} B / {STAGE1_BASE} B budget, '

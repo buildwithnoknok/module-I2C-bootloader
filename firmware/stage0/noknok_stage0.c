@@ -19,7 +19,7 @@
  * stage-1's job. That separation is what keeps this file small.
  *
  * ── Flash map (16 KB) ───────────────────────────────────────────────────────
- *   0x0000_0000  STAGE-0       1 KB     this code — FROZEN FOREVER (500 B used)
+ *   0x0000_0000  STAGE-0       1 KB     this code — FROZEN FOREVER (704 B used)
  *   0x0000_0400  STAGE-1       3 KB     the real bootloader — updatable
  *   0x0000_1000  APPLICATION   ~11.9 KB the module firmware — updatable
  *   0x0000_3F80  CONTROL BLOCK 64 B     stage-1 update marker (below)
@@ -31,30 +31,43 @@
  * what lets a future OTA move the stage-1/application boundary without needing
  * to change this frozen file.
  *
- * ── Power-loss safety ───────────────────────────────────────────────────────
- * Staging is CRC-verified by stage-1 BEFORE the marker is written, and is never
- * erased by the copy, so the copy is always repeatable from a known-good source.
- * Lose power mid-copy and the marker is still set -> we simply do it all again.
- * The operation is idempotent. Any marker value that is not exactly CTRL_MAGIC
- * reads as "no update pending", so a half-written marker fails safe: we jump to
- * a stage-1 we had not yet touched.
+ * ── Nothing is erased on unverified data ────────────────────────────────────
+ * Before stage-0 touches flash it proves, itself, that the update is real:
+ *   1. the control-block descriptor (words 0-4) must match its own CRC32 (word 5)
+ *   2. the descriptor must pass the geometry sanity checks
+ *   3. the staged image must match the CRC32 stage-1 recorded for it (word 3)
+ * Any failure -> "no update pending" -> boot the stage-1 we have not touched.
+ * Stage-1 already verifies the image before writing the marker, but stage-0 is
+ * the frozen part: it must not have to TRUST that. A corrupt marker, a bit-flip
+ * in app_base, or a stage-1 bug can never make this file erase the bootloader
+ * region on the strength of bad data.
  *
- * ── Why every flash op is verified ──────────────────────────────────────────
- * During the DEV-31 bench campaign (1664 erases, zero failures) two transients
- * appeared that never reproduced: one erase that silently did not take, and one
- * hang. Prime suspect is bench power, not silicon. For a component that can
- * never be patched, the correct response is not to explain them away but to
- * make them survivable: stage-0 verifies after EVERY erase and EVERY program
- * and retries. Costs ~30 bytes, and turns that whole class of fault into a
- * non-event.
+ * ── Power-loss safety ───────────────────────────────────────────────────────
+ * Staging is never erased by the copy, so the copy is always repeatable from a
+ * known-good source. Lose power mid-copy and the marker is still set -> we
+ * simply do it all again. The operation is idempotent. Any marker value that is
+ * not exactly CTRL_MAGIC reads as "no update pending", so a half-written marker
+ * fails safe.
+ *
+ * ── Why every flash op is verified, and what happens when it still fails ───
+ * During the DEV-31 bench campaign two transients appeared that never
+ * reproduced (one erase that did not take, one hang); prime suspect was bench
+ * power. Stage-0 verifies after EVERY erase and program and retries. If a page
+ * still will not take — most plausibly a brownout, since flash programming is
+ * the highest-current thing this chip does — stage-0 does NOT halt on the first
+ * miss: it counts the attempt in no-init RAM and resets. The marker is still
+ * set, so the next boot redoes the install on (hopefully) cleaner power. After
+ * MAX_ATTEMPTS warm resets it halts. A cold power-on randomises the counter,
+ * which reads as "fresh", so a user power-cycle always gets a full new set of
+ * attempts. The update path also waits ~50 ms before its first flash access so
+ * a slow-ramping rail (DEV-12's lesson) has settled; a normal boot does not.
  *
  * ── Recovery of last resort ─────────────────────────────────────────────────
- * Two states halt the CPU: unrecoverable flash failure, and no stage-1 ever
- * programmed. Both are reachable only by a hardware fault or a factory error,
- * never by a field event. Stage-0 deliberately never disables SDI, so SWD is
- * always available to reflash the part. There is no LED here on purpose —
- * driving PD1 requires disabling SDI, which would collide with the Flashing
- * Interface V3 SWD window (DEV-22). Stage-1 owns the LED.
+ * Two states halt the CPU: persistent flash failure across MAX_ATTEMPTS boots,
+ * and no stage-1 ever programmed. Both need a hardware fault or a factory
+ * error. Stage-0 deliberately never disables SDI, so SWD is always available.
+ * There is no LED here on purpose — driving PD1 requires disabling SDI, which
+ * would collide with the Flashing Interface V3 SWD window. Stage-1 owns the LED.
  */
 
 #include "ch32fun.h"
@@ -71,19 +84,30 @@
 #define PAGE_WORDS         (PAGE / 4U)
 
 #define CTRL_MAGIC         0x6E6B5530U   /* "nkU0" — a stage-1 update is pending */
-#define RETRIES            3U
+#define RETRIES            3U            /* per-page erase/program retries       */
+#define MAX_ATTEMPTS       4U            /* whole-install retries (warm resets)  */
 
 /* Control block. Written by stage-1, cleared by stage-0. All addresses use the
- * 0x0800_0000 flash-controller alias. */
+ * 0x0800_0000 flash-controller alias. Field order is a frozen contract. */
 typedef struct {
     uint32_t magic;         /* CTRL_MAGIC = update pending; anything else = no  */
     uint32_t staging_addr;  /* where the new stage-1 image is staged            */
     uint32_t stage1_len;    /* its length in bytes                              */
-    uint32_t stage1_crc32;  /* checked by stage-1 before the marker; unused here */
+    uint32_t stage1_crc32;  /* CRC32 of the staged image — verified HERE too    */
     uint32_t app_base;      /* application base — bounds the stage-1 region     */
+    uint32_t desc_crc32;    /* CRC32 over the five words above                  */
 } ctrl_t;
 
-#define CTRL ((const volatile ctrl_t *)CTRL_FLASH)
+#define CTRL       ((const volatile ctrl_t *)CTRL_FLASH)
+#define DESC_BYTES 20U      /* magic .. app_base */
+
+/* Install-attempt counter in no-init RAM. Lives in the 16 B every linker
+ * reserves above the stack (next to stage-1's handoff cell at 0x200007F0), so
+ * nothing else writes it and it survives a warm reset. High bits are a tag;
+ * if they do not match — cold power-on, random SRAM — the count reads as 0. */
+#define ATTEMPT_CELL   (*(volatile uint32_t *)0x200007F4U)
+#define ATTEMPT_TAG    0x5A000000U
+#define ATTEMPT_MASK   0xFF000000U
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * FLASH  (CH32V003 fast 64-byte page path — bench-validated, DEV-31)
@@ -156,6 +180,36 @@ static void halt(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+ * CRC32 — standard zlib (poly 0xEDB88320, init/final 0xFFFFFFFF). Matches
+ * stage-1's crc32_buf() and Python's zlib.crc32 on the Pico, so the CRC that
+ * stage-1 recorded for the staged image is directly comparable here.
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static uint32_t crc32(uint32_t addr, uint32_t len)
+{
+    const volatile uint8_t *p = (const volatile uint8_t *)addr;
+    uint32_t crc = 0xFFFFFFFFU;
+    for (uint32_t i = 0; i < len; i++) {
+        crc ^= p[i];
+        for (uint32_t b = 0; b < 8U; b++)
+            crc = (crc & 1U) ? (crc >> 1) ^ 0xEDB88320U : (crc >> 1);
+    }
+    return ~crc;
+}
+
+/* An install attempt failed. Count it and retry from the top on a fresh reset
+ * (the marker is still set, so the next boot redoes everything). After
+ * MAX_ATTEMPTS consecutive warm-reset attempts, give up and halt — SWD works. */
+static void fail_attempt(void)
+{
+    uint32_t cell = ATTEMPT_CELL;
+    uint32_t n    = ((cell & ATTEMPT_MASK) == ATTEMPT_TAG) ? (cell & 0xFFU) : 0U;
+    if (n + 1U >= MAX_ATTEMPTS) halt();
+    ATTEMPT_CELL = ATTEMPT_TAG | (n + 1U);
+    NVIC_SystemReset();
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
  * MAIN
  * ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -166,13 +220,24 @@ int main(void)
 
     if (CTRL->magic == CTRL_MAGIC) {
 
+        /* Update path only: let the rail settle before the first flash access.
+         * ~50 ms at the reset-default HSI. A normal boot never waits. */
+        for (volatile uint32_t i = 0; i < 120000U; i++);
+
         uint32_t app_base = CTRL->app_base;
         uint32_t staging  = CTRL->staging_addr;
         uint32_t len      = CTRL->stage1_len;
 
-        /* Validate the descriptor before letting it drive an erase. A bad
-         * control block must never be able to point us at the wrong region. */
-        int sane =
+        /* Three gates, cheapest first. Every one must pass before anything is
+         * unlocked, let alone erased. */
+
+        /* 1. The descriptor is intact: its own CRC matches. */
+        int ok = crc32(CTRL_FLASH, DESC_BYTES) == CTRL->desc_crc32;
+
+        /* 2. The geometry is sane: it can only ever point us at the stage-1
+         *    region, and the staging window lies entirely below the control
+         *    block. */
+        ok = ok &&
             app_base >  STAGE1_BASE_FLASH && app_base <= FLASH_END &&
             (app_base & (PAGE - 1U)) == 0U &&
             len      >  0U   && len <= (app_base - STAGE1_BASE_FLASH) &&
@@ -180,18 +245,25 @@ int main(void)
             (staging & (PAGE - 1U)) == 0U &&
             staging + len <= CTRL_FLASH;
 
-        if (sane) {
+        /* 3. The staged image really is what stage-1 verified: recompute its
+         *    CRC here. Stage-1 checked it before writing the marker, but the
+         *    frozen part does not get to trust the updatable part. */
+        ok = ok && crc32(staging, len) == CTRL->stage1_crc32;
+
+        if (ok) {
             uint32_t region = app_base - STAGE1_BASE_FLASH;
 
             fl_unlock();
 
             /* Rewrite the whole stage-1 region: the image, then 0xFF to the end
-             * so the region is exactly the staged image and nothing stale. */
+             * so the region is exactly the staged image and nothing stale.
+             * A page that will not take after RETRIES is not fatal yet — reset
+             * and try the whole install again (marker still set). */
             for (uint32_t off = 0; off < region; off += PAGE) {
                 const uint32_t *src = (off < len)
                                     ? (const uint32_t *)(staging + off)
                                     : (const uint32_t *)0;
-                if (!write_page(STAGE1_BASE_FLASH + off, src)) halt();
+                if (!write_page(STAGE1_BASE_FLASH + off, src)) fail_attempt();
             }
 
             /* Clear the marker LAST. Until this lands the update is still
@@ -200,12 +272,15 @@ int main(void)
                 fl_erase(CTRL_FLASH);
                 if (page_matches(CTRL_FLASH, 0)) break;
             }
+            if (!page_matches(CTRL_FLASH, 0)) fail_attempt();
 
+            ATTEMPT_CELL = 0;     /* success — next install starts fresh */
             NVIC_SystemReset();
         }
-        /* Not sane: fall through and boot stage-1. The marker stays set, but a
-         * descriptor this broken would only fail again — stage-1 and the host
-         * can see it and rewrite it. */
+        /* Any gate failed: fall through and boot the stage-1 we have not
+         * touched. The marker stays set — stage-0 never clears one it did not
+         * act on (that would mean unlocking flash on a normal boot). Stage-1
+         * and the host can see it and rewrite it on the next real update. */
     }
 
     /* Normal boot. Blank-check only: if a stage-1 was ever programmed, run it.

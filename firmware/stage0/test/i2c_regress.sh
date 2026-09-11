@@ -25,9 +25,10 @@ echo '=== 3. Pico: run the self-update over I2C ==='
 echo
 echo '=== 4. SWD cross-check ==='
 cd $S1
-$M -r + 0x08000400 2600 2>/dev/null | grep '^080' | cut -d: -f2 | tr -d ' \n' > chip.hex
+LEN=$(stat -c %s s1_0400_v101.bin)
+$M -r + 0x08000400 $LEN 2>/dev/null | grep '^080' | cut -d: -f2 | tr -d ' \n' > chip.hex
 od -A n -t x1 -v s1_0400_v101.bin | tr -d ' \n' > v101.hex
-if cmp -s chip.hex v101.hex; then echo 'stage-1 region == v1.0.1  (all 2600 bytes)'; else echo 'MISMATCH'; exit 1; fi
+if cmp -s chip.hex v101.hex; then echo "stage-1 region == v1.0.1  (all $LEN bytes)"; else echo 'MISMATCH'; exit 1; fi
 echo -n 'control block: '; $M -r + 0x08003F80 4 2>/dev/null | grep '^080' | cut -d: -f2
 echo -n 'staging @0x1000: '; $M -r + 0x08001000 4 2>/dev/null | grep '^080' | cut -d: -f2
 
