@@ -15,7 +15,7 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 >
 > **Stage-0 / stage-1 split (Sep 2026, DEV-31):** built and SWD-bench-validated — 4/4
 > tests, including recovery from a deliberately half-written stage-1. Stage-0 is 704 B
-> in a frozen 1 KB reservation; stage-1 is 2876 B in 3 KB. **Validated over I²C on
+> in a frozen 1 KB reservation; stage-1 is 2908 B in 3 KB. **Validated over I²C on
 > 11 Sep 2026** — a real stage-1 self-update v1.0.0 → v1.0.1 over the bus, confirmed from
 > both the I²C and SWD sides. `firmware/src/` (the monolithic bootloader) is still what every
 > existing module runs until they are re-flashed.
@@ -36,7 +36,7 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 | Region | Address | Size | Written by | Notes |
 |--------|---------|------|-----------|-------|
 | **Stage-0** | `0x0000_0000` | 1 KB | SWD (once) | Runs first on every reset. **Frozen forever.** Measured 704 B. |
-| **Stage-1** | `0x0000_0400` | 3 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2876 B. **Base must be 1 KB aligned** (mtvec). |
+| **Stage-1** | `0x0000_0400` | 3 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2908 B. **Base must be 1 KB aligned** (mtvec). |
 | Application | `0x0000_1000` | ~11.9 KB | I²C OTA | The module's real firmware, linked at the `0x1000` offset. |
 | **Control block** | `0x0000_3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Update marker + staging descriptor + `app_base`. |
 | Metadata | `0x0000_3FC0` | 64 B | I²C OTA | Validity marker: `{magic, app_length, app_crc32}`. |
@@ -103,7 +103,7 @@ their runtime address. The legacy monolithic bootloader doesn't implement it, so
 
 **Error codes** (`READ_STATUS` byte 1): 1 bad chunk len · 2 bad verify len · 3 offset out of range · 4 verify len invalid · 5 CRC mismatch · 6 BOOT with no valid app · **7 app unhealthy** (stage-1 refused to boot an app that crashed three times; cleared by the next command) · **8 not a stage-1 image** (`VERIFY_STAGE1` header check failed).
 
-**The app is watched.** Stage-1 counts every boot of the application; the app clears the counter once its I2C address is assigned, and every noknok app runs the independent watchdog so a hang becomes a warm reset. A valid-CRC app that crashes three times in a row is parked here with error 7 instead of being booted forever, and the Conductor's `rescue_parked_module()` puts it right by UID (`0xB3`). Contract for app authors: `Ecosystem/software/bootloader-update.md` §3.
+**The app is watched.** Stage-1 counts every boot of the application; the app clears the counter once its I2C address is assigned, and every noknok app runs the independent watchdog so a hang becomes a warm reset. A valid-CRC app that crashes three times in a row (three consecutive **watchdog** resets — any other reset cause starts a fresh series) is parked here with error 7 instead of being booted forever, and the Conductor's `rescue_parked_module()` puts it right by UID (`0xB3`). Contract for app authors: `Ecosystem/software/bootloader-update.md` §3.
 
 A running app enters the bootloader when the Pico sends it command `0xB0`
 (ENTER_BOOTLOADER): the app writes magic `0x6E6B4231` to `0x200007F0` and resets.
@@ -119,7 +119,7 @@ this project.
 
 ```sh
 cd firmware/stage0 && make build   # → noknok_stage0.bin  (704 B / 1 KB)
-cd firmware/stage1 && make build   # → noknok_stage1.bin  (2876 B / 3 KB)
+cd firmware/stage1 && make build   # → noknok_stage1.bin  (2908 B / 3 KB)
 ```
 
 Layouts are set by `stage0/stage0.ld` (`ORIGIN 0x0000`, 1 KB) and
@@ -132,6 +132,20 @@ file, using `ch32fun.h` for register definitions only. Linking `ch32fun.c` cost
 248 B — a 38-entry interrupt vector table and a general-purpose reset handler, in
 code that never enables an interrupt. Dropping it took stage-0 from 936 B to 500 B (704 B today, after the DEV-31 hardening: CRC gates and retry-by-reset).
 Stage-1 *does* use `ch32fun.mk`; it needs the vector table for the I²C handlers.
+
+## Regression — run before any stage-1 release
+
+```sh
+sh firmware/stage0/test/regress_all.sh      # on the bench Pi, ~4 min, PASS/FAIL table
+```
+
+One command covers the whole chain: the ten stage-0 SWD images (every power-loss window
+and every corrupt-descriptor attack), the stage-1 self-update over I²C cross-checked over
+SWD, the Conductor's `stage1_update()` with app restore, the wrong-file refusal, the
+hanging-app park, and the parked-module rescue. Each step, what it proves and what a FAIL
+means: [`firmware/stage0/test/TESTS.md`](firmware/stage0/test/TESTS.md). Mandatory before a
+stage-1 release (there is no rollback), a stage-0 change, an app change to the boot/watchdog
+block, a Conductor flashing/state change, or a production batch.
 
 To flash a module, build one combined image rather than flashing the stages
 separately — see [Recovery & SWD flashing](#recovery--swd-flashing) below.

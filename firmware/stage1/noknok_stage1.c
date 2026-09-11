@@ -109,17 +109,20 @@
  * reserved 16 B as the handoff cell, so it survives a warm reset and nothing
  * else writes it. Stage-1 counts every jump to the application; the app clears
  * the cell the moment it has proved itself (I2C address assigned). If the count
- * reaches APP_MAX_ATTEMPTS — three consecutive warm resets without the app ever
- * getting healthy — stage-1 stops booting it and parks in flash mode with
+ * reaches APP_MAX_ATTEMPTS — three consecutive WATCHDOG resets without the app
+ * ever getting healthy — stage-1 stops booting it and parks in flash mode with
  * last_error = ERR_APP_UNHEALTHY, so the host can see why and push a good image.
  *
  * This is what turns "a broken app with a valid CRC is booted forever" into
  * "a broken app is booted three times, then the module waits for help". It
  * needs the app to run a watchdog, so a hang becomes a warm reset (the apps do).
- * A cold power-on randomises the cell, which reads as 0: the user power-cycling
- * gives the app another three tries, which is the right behaviour for a
- * transient. A 0xB0 reset never counts — that path enters flash mode before
- * jump_to_app() is reached. */
+ *
+ * Only a reset CAUSED BY THE WATCHDOG continues the series (RCC_IWDGRSTF); any
+ * other cause — power-on, software reset, SWD, NRST — starts a fresh one. So a
+ * healthy app that simply never got assigned (no Conductor running, a quick
+ * re-plug, a debugger reboot) is not mistaken for a crashing one. Found by the
+ * first regression run: the SWD rig's reboots parked a good app. A 0xB0 reset
+ * never counts — that path enters flash mode before jump_to_app() is reached. */
 #define APP_ATTEMPT_CELL   (*(volatile uint32_t *)0x200007F8U)
 #define APP_ATTEMPT_TAG    0xA5000000U
 #define APP_ATTEMPT_MASK   0xFF000000U
@@ -580,6 +583,13 @@ int main(void)
 
     uint32_t magic = BL_MAGIC_CELL;
     BL_MAGIC_CELL  = 0;                   /* consume the handoff flag */
+
+    /* Hardening C: the attempt series only continues across watchdog resets.
+     * Read the cause, clear the flags so the next boot sees only its own. */
+    uint32_t cause = RCC->RSTSCKR;
+    RCC->RSTSCKR   = cause | RCC_RMVF;
+    if (!(cause & RCC_IWDGRSTF))
+        APP_ATTEMPT_CELL = 0;             /* not a crash: fresh series */
 
     uint8_t app_unhealthy = 0;
     if (magic != BL_MAGIC_ENTER && app_is_valid()) {

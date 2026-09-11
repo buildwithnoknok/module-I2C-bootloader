@@ -370,7 +370,7 @@ end to end**. USB raises `NotImplementedError` until the CH32V203 port.
 
 Source: `firmware/stage1/`. Relinked from `0x0000` to `0x0400`, derived from the
 hardware-validated monolithic bootloader; **the application-flashing path is unchanged**.
-Builds to **2876 B in the 3 KB region** (196 B free), 96 B RAM, after hardening C/D/E
+Builds to **2908 B in the 3 KB region** (164 B free), 96 B RAM, after hardening C/D/E
 below (it was 2600 B before).
 
 The design principle for the new commands: **a stage-1 update is the same transfer as an
@@ -411,6 +411,14 @@ stage-1 parks in flash mode with `last_error = 7`. Needs every app to run the IW
 becomes a warm reset (LED Button v2.3, Buzzer v3.4.0, Knob v2.2.0, Display v0.4.0 do). A
 `0xB0` reset never counts. Cold power-on randomises the cell → three fresh tries, which is
 right for a transient.
+
+**Refined by the first regression run (11 Sep 2026): the series only continues across
+watchdog resets.** Stage-1 reads `RCC->RSTSCKR` at boot (and clears the flags with `RMVF`);
+if the reset was *not* `IWDGRSTF` — power-on, software, SWD, NRST — the cell is zeroed first.
+So "unhealthy" means exactly *three watchdog resets in a row*. The original "count every warm
+boot" rule parked a perfectly good LED Button after three debugger reboots on the bench, and
+would have done the same to a module re-plugged quickly with no Conductor around to assign
+it. Costs 32 B (stage-1 now 2908 B).
 
 **Bench (`bad_app.c` — valid CRC, starts the IWDG, hangs):** witness `FF BA BA BA FF` — ran
 on attempts 1, 2, 3, never a fourth; then `0x7E` answered `[3, 7]`.
