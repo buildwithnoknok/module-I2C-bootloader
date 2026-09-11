@@ -8,7 +8,8 @@
  * in the SAME 1 KB sector intact — including while the CPU is executing from
  * that sector?
  *
- * If yes, stage-0 can be 512 B at 0x0000 and erase stage-1 starting at 0x0200.
+ * If yes, a sub-1 KB stage-0 is possible on erase grounds. (It turned out the
+ * binding constraint is mtvec alignment, not erase granularity - see the spec.)
  * If no, stage-0 must be a full 1 KB (sector granularity).
  *
  * Method, repeated ROUNDS times:

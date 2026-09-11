@@ -6,12 +6,12 @@
 # link exactly what we need and nothing else. ch32fun.h is still used, for its
 # register definitions only (header-only, no code).
 #
-#   make build   -> noknok_stage0.bin  (must fit 768 B — see stage0.ld)
+#   make build   -> noknok_stage0.bin  (must fit 1 KB — see stage0.ld)
 #   make flash   -> SWD-flash via WCH-LinkE + minichlink
 #   make size    -> report the size against the frozen budget
 
 TARGET   = noknok_stage0
-BUDGET   = 768
+BUDGET   = 1024
 CH32FUN  = ../ch32fun
 MINICHLINK = ../minichlink/minichlink
 

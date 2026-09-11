@@ -1,10 +1,10 @@
 /* noknok stage-1 linker — CH32V003
  *
- * Stage-1 is the real bootloader, relinked from 0x0000 to 0x0300 so the frozen
+ * Stage-1 is the real bootloader, relinked from 0x0000 to 0x0400 so the frozen
  * stage-0 can sit below it and replace it in the field.
  *
- *   ORIGIN 0x0300 = the stage-0 reservation (768 B, frozen — see stage0.ld)
- *   LENGTH 3328   = app_base (0x1000) - stage1_base (0x0300)
+ *   ORIGIN 0x0400 = the stage-0 reservation (1 KB, frozen — see stage0.ld)
+ *   LENGTH 3072   = app_base (0x1000) - stage1_base (0x0400)
  *
  * Unlike stage-0, stage-1 DOES link ch32fun.c: it needs the interrupt vector
  * table for the I2C slave handlers.
@@ -18,7 +18,7 @@ ENTRY( InterruptVector )
 
 MEMORY
 {
-	FLASH (rx) : ORIGIN = 0x00000300, LENGTH = 3328   /* 3.25 KB stage-1       */
+	FLASH (rx) : ORIGIN = 0x00000400, LENGTH = 3072   /* 3 KB stage-1          */
 	RAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 2032   /* 2 KB - 16 B (handoff) */
 }
 
@@ -131,5 +131,14 @@ SECTIONS
 
 /* Stage-1 must start exactly at the stage-0 boundary. If these ever disagree,
  * stage-0 would jump into the middle of nothing. */
-ASSERT( ADDR(.init) == 0x00000300,
-        "stage-1 must start at 0x0300 — the frozen stage-0 boundary" )
+ASSERT( ADDR(.init) == 0x00000400,
+        "stage-1 must start at 0x0400 — the frozen stage-0 boundary" )
+
+/* And that boundary MUST be 1 KB aligned. The vector table lives at the start
+ * of stage-1 and mtvec only honours the upper address bits on this core — a
+ * table at 0x0300 silently became 0x0000 on the bench (11 Sep 2026) and the
+ * first I2C interrupt jumped into stage-0's code. Kept as a separate check so
+ * it still guards if the base is ever moved (e.g. to 0x0800 for a larger
+ * stage-0). */
+ASSERT( (ADDR(.init) & 0x3FF) == 0,
+        "stage-1 base must be 1 KB aligned — mtvec ignores the low bits" )

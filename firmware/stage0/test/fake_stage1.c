@@ -8,14 +8,14 @@
  * single SWD read tells us WHICH stage-1 actually ran.
  *
  * Build it twice with different -DSTAGE1_ID values:
- *   ID 0xA1 = the stage-1 already installed at 0x0300
+ *   ID 0xA1 = the stage-1 already installed at 0x0400
  *   ID 0xA2 = the replacement staged in the app region for stage-0 to copy
  *
  * Then reading the witness page answers the only question that matters:
  *   0xA1 -> stage-0 jumped to the installed stage-1  (jump path works)
  *   0xA2 -> stage-0 applied the pending update       (update path works)
  *
- * Linked at 0x0300 (fake_stage1.ld) and reuses stage-0's minimal start.S.
+ * Linked at 0x0400 (fake_stage1.ld) and reuses stage-0's minimal start.S.
  */
 
 #include "ch32fun.h"

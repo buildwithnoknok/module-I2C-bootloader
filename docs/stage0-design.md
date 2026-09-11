@@ -5,7 +5,7 @@ Copyright (c) noknok
 
 # Stage-0 / Stage-1 Bootloader Split — Design Spec
 
-**Status:** design, bench-validated flash behaviour · **Jira:** DEV-31 · **Target:** CH32V003 (CH32V203 variant at the end)
+**Status:** implemented and validated over I²C (11 Sep 2026); frozen layout 1 KB / `0x0400` · **Jira:** DEV-31 · **Target:** CH32V003 (CH32V203 variant at the end)
 
 This is the design for making the noknok module **bootloader itself** field-updatable.
 Everything else on a module already is: the payload firmware updates over I2C/USB, and
@@ -40,8 +40,8 @@ works for USB (where a receiver would mean carrying a whole USB stack in the fro
 
 | Region | Address | Size | Written by | Mutable in field |
 |---|---|---|---|---|
-| **Stage-0** | `0x0000` | 768 B (500 B used) | SWD, once at manufacture | **Never** |
-| **Stage-1** | `0x0300` | 3.25 KB | stage-0, from staging | Yes |
+| **Stage-0** | `0x0000` | 1 KB (500 B used) | SWD, once at manufacture | **Never** |
+| **Stage-1** | `0x0400` | 3 KB (2600 B used) | stage-0, from staging | Yes |
 | **Application** | `0x1000` | 12 KB − 128 B | stage-1, over the bus | Yes |
 | **BL control block** | `0x3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Yes |
 | **App metadata** | `0x3FC0` | 64 B | stage-1 | Yes |
@@ -55,14 +55,14 @@ destroying app metadata — which relies on 64-byte erase granularity (validated
 
 ### Stage-0 hardcodes exactly two addresses
 
-`STAGE1_BASE` (`0x0200`) and `CTRL_BLOCK` (`0x3F80`). **Everything else is data it reads
+`STAGE1_BASE` (`0x0400`) and `CTRL_BLOCK` (`0x3F80`). **Everything else is data it reads
 from the control block** — including the application base and the staging address.
 
 This is what keeps DEV-31's question 2 answered "yes": a future OTA *can* enlarge the
-bootloader reservation (e.g. stage-1 `0x0200`→`0x1800`, trading payload space), because
+bootloader reservation (e.g. stage-1 `0x0400`→`0x1800`, trading payload space), because
 stage-0 never assumes where the application lives. Such a resize is necessarily a
 combined "new stage-1 + new app" transaction, since an app linked at `0x1000` cannot run
-at a different base. The permanent floor is stage-0's own 512 B.
+at a different base. The permanent floor is stage-0's own 1 KB.
 
 ### Control block layout (`0x3F80`, 64 B)
 
@@ -83,7 +83,7 @@ stage-0 jumps to a stage-1 it has not touched.
 
 1. Read the control block. If `update_magic` matches **and** the staging descriptor is
    sane → **apply the stage-1 update** (§5), then reset.
-2. Else if stage-1's first word is not `0xFFFFFFFF` → **jump to stage-1** at `0x0200`.
+2. Else if stage-1's first word is not `0xFFFFFFFF` → **jump to stage-1** at `0x0400`.
 3. Else → no stage-1 was ever programmed. Signal on the status LED and halt; SWD
    recovery required. This state is reachable only by a factory error, never by a field
    event.
@@ -131,7 +131,7 @@ The layout above depends on the CH32V003's **64-byte fast erase**
   checkerboard pattern, in every round, including across all 1 KB sector boundaries.
 - **The CPU keeps executing from a sector while a page in that same sector is erased**
   (192 consecutive erases inside the live-code sector). This is the specific behaviour
-  a 512-byte stage-0 needs, since it must erase `0x0200` from within sector 0.
+  a sub-1 KB stage-0 would need. (It turned out not to be the binding constraint — see §7.)
 - `BSY` asserts immediately after `STRT` (256/256) — no settle delay is required.
 
 ### Erase sequence to freeze into stage-0
@@ -199,22 +199,42 @@ Stage-0 uses **zero RAM** — all state is locals. `start.S` therefore does not 
 or zero `.bss`, and `stage0.ld` **ASSERTs both are empty** so a future edit that
 introduces a global fails the build loudly instead of running on uninitialised memory.
 
-### The frozen boundary: 768 B
+### The frozen boundary: 1 KB — and why it is not smaller
 
-500 B fits inside 512 B — but with only **12 B of slack**, and that is not enough to
-freeze. The margin here is not for stage-0 to grow (it never will); it is for:
+The image measures 500 B, and §6 proved 64-byte erase granularity, so on erase grounds a
+512 B or 768 B reservation would have worked. **It does not, for a different reason:**
 
-* fixes found during validation, before the batch is programmed; and
-* **toolchain drift** — a different GCC at production time emitting a slightly larger
-  image would be a crisis at 12 B of slack and a non-event at 268 B.
+> **The stage-1 base must be 1 KB aligned.** On this core `mtvec` only honours the upper
+> address bits. ch32fun sets `mtvec = InterruptVector | 3`; with stage-1 linked at `0x0300`
+> the hardware silently used `0x0000`, so the first I²C interrupt jumped into stage-0's
+> code and the CPU fell over.
 
-The risk is asymmetric: too tight is unrecoverable, too generous costs bytes nobody needs.
-Stage-1 still gets **3.25 KB against an expected ~2.4 KB**.
+**How it presented on the bench (11 Sep 2026):** stage-1 at `0x0300` ACKed its I²C address
+in hardware — the peripheral was configured and matching — but every read returned all
+`0xFF`, because the ISR that loads the data register never ran. Relinked to `0x0400` it
+worked first time, unchanged. Empirically: 256 B alignment fails, 1 KB works; 512 B was not
+tested and is not worth the risk for a frozen component.
 
-> **Frozen boundary: stage-0 = 768 B, stage-1 base = `0x0300`.**
+**Why none of the 10 Sep tests caught it:** none of them took an interrupt in stage-1. The
+boot-chain test found a valid app and jumped before any I²C traffic. The first real bus
+transaction found it in seconds — which is exactly why the I²C bench session exists.
+
+Since nothing can live in `0x0300–0x03FF` if stage-1 cannot start there, stage-0 takes the
+whole 1 KB. 524 B of slack covers pre-freeze fixes and toolchain drift many times over.
+Stage-1 gets **3 KB against a measured 2600 B** (472 B free) — comfortable, and stage-1 is
+updatable anyway. This is the "Layout A" from the original design discussion; the 64-byte
+erase finding remains real and useful (the control block depends on it, and it is what lets
+a future OTA move `app_base` at fine granularity), it just was not the binding constraint.
+
+Both linker scripts now `ASSERT` this: `stage1.ld` checks its base is 1 KB aligned as a
+separate assertion, so the guard survives if the base is ever moved again.
+
+> **Frozen boundary: stage-0 = 1 KB, stage-1 base = `0x0400`.**
 > This is the one number that cannot change after DEV-29 programs the production batch.
+> Superseded figures: 512 B / `0x0200` (design estimate), 768 B / `0x0300` (first measured
+> build, before the alignment constraint was known).
 
-## 7A. Bench validation of stage-0 (10 Sep 2026)
+## 7A. Bench validation of stage-0 (10 Sep 2026, re-run 11 Sep at `0x0400`)
 
 Validated on an LED Button board over SWD, using a fake stage-1 harness
 (`firmware/stage0/test/`) that stamps its own ID into a witness page at `0x3C00`, so a
@@ -238,22 +258,65 @@ copy again. The second half — the part missing after the simulated cut — cam
 byte-identical. **This is DEV-31's core acceptance criterion demonstrated on hardware.**
 
 The boot-chain test is the integration proof: stage-0 hands off to the **real** stage-1 at
-`0x0300`, which runs, validates the application against its metadata, and jumps to it.
+`0x0400`, which runs, validates the application against its metadata, and jumps to it.
 
-**Still to do — needs the Pico I2C rig, not just SWD:**
+All four were re-run on 11 Sep after the move to `0x0400`: 4/4 again.
 
-- `VERIFY_STAGE1` and `GET_VERSION` exercised over the wire.
-- A real end-to-end stage-1 update driven by the Conductor (`0xB0` → stage a new stage-1 →
-  `VERIFY_STAGE1` → `BOOT` → stage-0 installs → re-push the app).
+## 7B. I²C bench validation — the real thing (11 Sep 2026)
+
+Pico + `brain-Pico/software/bench_stage1.py`, LED Button on the Qwiic bus, an old buzzer
+alongside purely as the pull-up source (a bare Pico on a Qwiic cable is not a noknok host).
+The module was SWD-flashed with stage-0 + stage-1 **v1.0.0**, no app, and the test then
+staged a stage-1 **v1.0.1** — a build differing only in the version byte — over I²C.
+
+| Step | Result |
+|---|---|
+| `0xB1 GET_VERSION` at `0x7E` | `[1, 1, 0, 0]` — proto 1, **v1.0.0** |
+| `ERASE` + `WRITE_CHUNK` × 41 (2600 B) | ok |
+| `0x06 VERIFY_STAGE1` | **READY** — CRC `0x92C8852C` matched, control block written |
+| `BOOT` | `0x7E` went away, back after **284 ms** |
+| `0xB1 GET_VERSION` | `[1, 1, 0, 1]` — **v1.0.1** |
+
+**The changed version number is the proof.** Same bytes before and after would show
+nothing; a version that went from 1.0.0 to 1.0.1 can only mean stage-0 did the copy.
+
+Cross-checked from the SWD side immediately afterwards: stage-1 region byte-identical to the
+v1.0.1 file (all 2600 bytes, and explicitly not v1.0.0), control block cleared, staging copy
+untouched at `0x1000`, stage-0 untouched. The same event confirmed from two independent
+directions.
+
+Then the real LED Button app was installed on top (combined image) and the module booted
+it — `0x7E` silent, full chain stage-0 → stage-1 v1.0.1 → application on real hardware.
+
+**Two things the I²C session established that SWD could not:**
+
+1. The `mtvec` alignment constraint (§7). This was the first time stage-1 took an interrupt.
+2. The host must wait for `0x7E` to **disappear** before waiting for it to reappear. Right
+   after `BOOT` the old stage-1 is still answering, so a plain "wait for bootloader" returns
+   immediately with the *old* one and the test goes blind. `bench_stage1.py` has
+   `wait_for_bootloader_gone()` for this. **The same hazard applies to the USB port** — same
+   PID on both sides of the update — and is noted on the USB Confluence page.
+
+**Also closed on 11 Sep:** the fast-erase probe re-run on JST-SH pigtail power (LinkE
+target power off, board powered from the Pico) — **768 erases across four runs, zero
+failures, zero hangs**. Combined with 10 Sep that is 2432 erases with exactly one anomaly,
+in the very first four attempts ever, never repeated. Closed as an early bench transient;
+stage-0's verify-and-retry covers the class regardless.
+
+**Still to do:**
+
 - Interruption at the other three windows in §5 (during staging, during the marker write,
-  during the marker clear). Only the mid-copy window is covered so far.
+  during the marker clear). Only the mid-copy window is covered so far. These can be
+  simulated over SWD the same way `test_recover` was.
+- Conductor integration — `noknok.py` needs a `stage1_update()` alongside `update_module()`,
+  using `bench_stage1.py`'s two new commands and the disappear-then-reappear wait.
 - The same exercise on the CH32V203 over USB.
 
 ## 8. Stage-1 — IMPLEMENTED (10 Sep 2026)
 
-Source: `firmware/stage1/`. Relinked from `0x0000` to `0x0300`, derived from the
+Source: `firmware/stage1/`. Relinked from `0x0000` to `0x0400`, derived from the
 hardware-validated monolithic bootloader; **the application-flashing path is unchanged**.
-Builds to **2596 B in the 3.25 KB region** (732 B free), 96 B RAM.
+Builds to **2600 B in the 3 KB region** (472 B free), 96 B RAM.
 
 The design principle for the new commands: **a stage-1 update is the same transfer as an
 application update.** Same `ERASE`, same `WRITE_CHUNK`, same staging area. Only the
@@ -279,7 +342,7 @@ There is no ambiguity because the bootloader answers at `0x7E` and apps answer a
 runtime address. It also gives the fleet discriminator for free: **the old monolithic
 bootloader does not implement `0xB1`, so silence means "old world" and a reply means
 "stage-0/stage-1 module".** Stage-0's presence is implied — if stage-1 is running from
-`0x0300`, something at `0x0000` jumped to it.
+`0x0400`, something at `0x0000` jumped to it.
 
 Two constants are kept deliberately distinct in stage-1, because conflating them is an
 easy way to corrupt the control block later: `APP_REGION_LEN` (12160 B) bounds what an
@@ -289,7 +352,10 @@ too.
 
 ## 9. CH32V203 (USB modules)
 
-Same design, more headroom, and no dependency on the fast-erase result:
+Same design, more headroom, and no dependency on the fast-erase result. The 1 KB stage-0
+planned there already satisfies the vector-table alignment constraint found on the V003
+(§7) — assume the QingKe V4 core has the same or a stricter requirement and keep stage-1
+on a 1 KB boundary, with the same `ASSERT` in its linker script:
 
 | Region | Address | Size |
 |---|---|---|

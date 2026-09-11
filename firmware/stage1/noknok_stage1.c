@@ -8,14 +8,14 @@
  * itself FIELD-UPDATABLE — it can receive its own replacement and hand it to
  * the frozen stage-0 below it to install.
  *
- * Relinked from 0x0000 to 0x0300. Derived from firmware/src/noknok_bootloader.c
+ * Relinked from 0x0000 to 0x0400. Derived from firmware/src/noknok_bootloader.c
  * (2132 B, hardware-validated Jun 2026); the app-flashing path is unchanged.
  *
  * Design spec: docs/stage0-design.md   ·   Jira: DEV-31
  *
  * ── Flash map (16 KB) ───────────────────────────────────────────────────────
- *   0x0000_0000  STAGE-0       768 B    frozen; applies stage-1 updates
- *   0x0000_0300  STAGE-1       3.25 KB  this code — updatable via stage-0
+ *   0x0000_0000  STAGE-0       1 KB     frozen; applies stage-1 updates
+ *   0x0000_0400  STAGE-1       3 KB     this code — updatable via stage-0
  *   0x0000_1000  APPLICATION   ~11.9 KB flashed over I2C; also the STAGING area
  *   0x0000_3F80  CONTROL BLOCK 64 B     stage-1 update marker, read by stage-0
  *   0x0000_3FC0  METADATA      64 B     {magic, app_len, app_crc32}
@@ -68,11 +68,18 @@
  * monolithic bootloader does not implement it, so silence means "old world" —
  * that is how the Conductor tells the two fleets apart. */
 #define BL_PROTOCOL_VERSION 0x01
+#ifndef S1_VERSION_MAJOR
 #define S1_VERSION_MAJOR    1
+#endif
+#ifndef S1_VERSION_MINOR
 #define S1_VERSION_MINOR    0
+#endif
+#ifndef S1_VERSION_PATCH
 #define S1_VERSION_PATCH    0
+#endif
 
 /* Flash layout (flash-controller alias 0x08000000) */
+#define STAGE1_BASE_FLASH  0x08000400U   /* where this code lives; 1 KB-aligned */
 #define APP_BASE_EXEC      0x00001000U
 #define APP_BASE_FLASH     0x08001000U
 
@@ -88,6 +95,7 @@
  * accident in the erase loop. */
 #define APP_REGION_LEN     (0x3F80U - 0x1000U)      /* 12160 B usable          */
 #define APP_ERASE_LEN      (0x4000U - 0x1000U)      /* 12 KB, 12 x 1 KB pages  */
+#define STAGE1_REGION_LEN  (APP_BASE_FLASH - STAGE1_BASE_FLASH)  /* 3 KB      */
 #define META_FLASH         (0x08000000U + 0x3FC0U)  /* app validity marker      */
 #define META_ERASE_PAGE    (0x08000000U + 0x3C00U)  /* 1 KB page holding it     */
 #define CTRL_FLASH         (0x08000000U + 0x3F80U)  /* stage-1 update control   */
@@ -463,7 +471,7 @@ static void do_verify(void)
 static void do_verify_stage1(void)
 {
     uint32_t len;
-    if (!staged_crc_ok(&len, APP_BASE_FLASH - 0x08000300U)) return;
+    if (!staged_crc_ok(&len, STAGE1_REGION_LEN)) return;
 
     uint32_t crc = (uint32_t)rx_buf[5] | ((uint32_t)rx_buf[6] << 8) |
                    ((uint32_t)rx_buf[7] << 16) | ((uint32_t)rx_buf[8] << 24);

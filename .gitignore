@@ -9,3 +9,5 @@ generated_*.ld
 
 # ...but keep the released bootloader binary
 !firmware/bin/noknok_bootloader.bin
+!firmware/bin/noknok_stage0.bin
+!firmware/bin/noknok_stage1.bin

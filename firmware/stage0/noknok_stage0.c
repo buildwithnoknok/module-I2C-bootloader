@@ -19,8 +19,8 @@
  * stage-1's job. That separation is what keeps this file small.
  *
  * ── Flash map (16 KB) ───────────────────────────────────────────────────────
- *   0x0000_0000  STAGE-0       768 B    this code — FROZEN FOREVER (500 B used)
- *   0x0000_0300  STAGE-1       3.25 KB  the real bootloader — updatable
+ *   0x0000_0000  STAGE-0       1 KB     this code — FROZEN FOREVER (500 B used)
+ *   0x0000_0400  STAGE-1       3 KB     the real bootloader — updatable
  *   0x0000_1000  APPLICATION   ~11.9 KB the module firmware — updatable
  *   0x0000_3F80  CONTROL BLOCK 64 B     stage-1 update marker (below)
  *   0x0000_3FC0  APP METADATA  64 B     stage-1 owns this, stage-0 ignores it
@@ -61,8 +61,8 @@
 #include <stdint.h>
 
 /* ── The two frozen addresses ─────────────────────────────────────────────── */
-#define STAGE1_BASE_EXEC   0x00000300U   /* execution alias — where we jump    */
-#define STAGE1_BASE_FLASH  0x08000300U   /* controller alias — where we write  */
+#define STAGE1_BASE_EXEC   0x00000400U   /* execution alias — where we jump    */
+#define STAGE1_BASE_FLASH  0x08000400U   /* controller alias — where we write  */
 #define CTRL_FLASH         0x08003F80U   /* stage-1 update control block       */
 
 /* ── Fixed properties of the part ─────────────────────────────────────────── */

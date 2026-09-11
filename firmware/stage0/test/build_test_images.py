@@ -7,7 +7,7 @@
 # Produces two 16 KB SWD-flashable images that exercise stage-0's two paths.
 # In both, the witness page at 0x3C00 tells you which stage-1 actually ran.
 #
-#   test_jump.bin    stage-0 + fake stage-1 "A1" installed at 0x0300, no update
+#   test_jump.bin    stage-0 + fake stage-1 "A1" installed at 0x0400, no update
 #                    pending.  EXPECT witness == 0xA1  (stage-0 jumped to it)
 #
 #   test_update.bin  same, PLUS fake stage-1 "A2" staged at 0x1000 and a valid
@@ -38,7 +38,7 @@ def find_ch32fun(start):
 CH32FUN = find_ch32fun(HERE)
 
 FLASH_SIZE   = 0x4000
-STAGE1_BASE  = 0x0300          # execution/file offset
+STAGE1_BASE  = 0x0400          # execution/file offset — MUST be 1 KB aligned (mtvec)
 APP_BASE     = 0x1000
 CTRL_OFF     = 0x3F80
 META_OFF     = 0x3FC0
@@ -130,7 +130,7 @@ def main():
 
     # ---- test_chain: the REAL stage-1, not a stub ---------------------------
     # stage-0 -> real stage-1 -> application. Proves stage-0 hands off correctly
-    # to the actual bootloader, that stage-1 runs from 0x0300, validates the app
+    # to the actual bootloader, that stage-1 runs from 0x0400, validates the app
     # against its metadata, and jumps to it. The "app" is the same witness
     # harness relinked to the app base, so one read confirms the whole chain.
     s1 = None

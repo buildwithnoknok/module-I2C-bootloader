@@ -15,17 +15,18 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 >
 > **Stage-0 / stage-1 split (Sep 2026, DEV-31):** built and SWD-bench-validated — 4/4
 > tests, including recovery from a deliberately half-written stage-1. Stage-0 is 500 B
-> in a frozen 768 B reservation; stage-1 is 2596 B in 3.25 KB. **Not yet exercised over
-> I²C** — the new commands still need the Pico rig, so `firmware/src/` (the monolithic
-> bootloader) remains what every existing module runs today.
+> in a frozen 1 KB reservation; stage-1 is 2600 B in 3 KB. **Validated over I²C on
+> 11 Sep 2026** — a real stage-1 self-update v1.0.0 → v1.0.1 over the bus, confirmed from
+> both the I²C and SWD sides. `firmware/src/` (the monolithic bootloader) is still what every
+> existing module runs until they are re-flashed.
 
 ## Repo layout
 
 | Path | What | Status |
 |------|------|--------|
 | `firmware/stage0/` | Frozen stage-0 — applies stage-1 updates, then jumps to stage-1. Never changes after manufacture. | New (DEV-31) |
-| `firmware/stage1/` | The real bootloader, relinked to `0x0300`. I²C flashing + self-update. | New (DEV-31) |
-| `firmware/src/` | The original monolithic 4 KB bootloader. | **Legacy** — what shipped modules run; retire once stage-1 is proven over I²C |
+| `firmware/stage1/` | The real bootloader, relinked to `0x0400`. I²C flashing + self-update. | New (DEV-31) |
+| `firmware/src/` | The original monolithic 4 KB bootloader. | **Legacy** — what shipped modules run until re-flashed; retire once they are |
 | `firmware/stage0/test/` | Stage-0 bench harness + test-image builder. | — |
 | `firmware/test/fast_erase_probe/` | Probe proving CH32V003 64-byte erase granularity. | — |
 | `docs/stage0-design.md` | Full stage-0 / stage-1 design spec. | — |
@@ -34,8 +35,8 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 
 | Region | Address | Size | Written by | Notes |
 |--------|---------|------|-----------|-------|
-| **Stage-0** | `0x0000_0000` | 768 B | SWD (once) | Runs first on every reset. **Frozen forever.** Measured 500 B. |
-| **Stage-1** | `0x0000_0300` | 3.25 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2596 B. |
+| **Stage-0** | `0x0000_0000` | 1 KB | SWD (once) | Runs first on every reset. **Frozen forever.** Measured 500 B. |
+| **Stage-1** | `0x0000_0400` | 3 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2600 B. **Base must be 1 KB aligned** (mtvec). |
 | Application | `0x0000_1000` | ~11.9 KB | I²C OTA | The module's real firmware, linked at the `0x1000` offset. |
 | **Control block** | `0x0000_3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Update marker + staging descriptor + `app_base`. |
 | Metadata | `0x0000_3FC0` | 64 B | I²C OTA | Validity marker: `{magic, app_length, app_crc32}`. |
@@ -56,7 +57,7 @@ everything about the application stays stage-1's job.
 
 1. Control-block marker set and staging descriptor sane? → erase stage-1, copy
    staging → stage-1 (verify + retry per page), clear the marker, **reset**.
-2. Else stage-1's first word isn't `0xFFFFFFFF`? → **jump to stage-1** (`0x0300`).
+2. Else stage-1's first word isn't `0xFFFFFFFF`? → **jump to stage-1** (`0x0400`).
 3. Else → no stage-1 ever programmed: halt, SWD recovery. (Factory error only.)
 
 **Stage-1** — behaviour unchanged
@@ -112,12 +113,12 @@ Requires [cnlohr/ch32fun](https://github.com/cnlohr/ch32fun) checked out next to
 this project.
 
 ```sh
-cd firmware/stage0 && make build   # → noknok_stage0.bin  (500 B / 768 B)
-cd firmware/stage1 && make build   # → noknok_stage1.bin  (2596 B / 3.25 KB)
+cd firmware/stage0 && make build   # → noknok_stage0.bin  (500 B / 1 KB)
+cd firmware/stage1 && make build   # → noknok_stage1.bin  (2600 B / 3 KB)
 ```
 
-Layouts are set by `stage0/stage0.ld` (`ORIGIN 0x0000`, 768 B) and
-`stage1/stage1.ld` (`ORIGIN 0x0300`, 3328 B). Both linker scripts `ASSERT` their
+Layouts are set by `stage0/stage0.ld` (`ORIGIN 0x0000`, 1 KB) and
+`stage1/stage1.ld` (`ORIGIN 0x0400`, 3072 B). Both linker scripts `ASSERT` their
 start address, so a mismatched pair fails the build rather than producing a stage-0
 that jumps into nothing.
 
@@ -151,7 +152,7 @@ Flash-controller addresses use the `0x0800_0000` alias.
 Run once per blank board, or to recover a module whose **bootloader** got corrupted.
 
 With the stage-0 / stage-1 split, flash **one combined image** containing stage-0 at
-`0x0000` and stage-1 at `0x0300` — flashing the two separately would whole-erase the
+`0x0000` and stage-1 at `0x0400` — flashing the two separately would whole-erase the
 chip between steps and wipe the first one:
 
 ```sh
