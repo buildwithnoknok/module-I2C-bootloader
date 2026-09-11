@@ -34,6 +34,18 @@ SECTIONS
 		_einit = .;
 	} >FLASH AT>FLASH
 
+	/* Image header at a FIXED offset (base + 0x100), just past the vector
+	 * table. VERIFY_STAGE1 reads a staged image here to confirm it really is a
+	 * stage-1 built for this layout before it arms stage-0 (hardening E). The
+	 * offset is a contract with stage-1's do_verify_stage1() — do not move it. */
+	.stage1_hdr ORIGIN(FLASH) + 0x100 : AT(ORIGIN(FLASH) + 0x100)
+	{
+		KEEP(*(.stage1_hdr))
+	} >FLASH
+	/* The explicit AT() matters: "AT>FLASH" would continue the load-address
+	 * counter from the end of .init (0x4F8), putting the header at file offset
+	 * 0xF8 while VERIFY_STAGE1 reads 0x100. Caught on the first build. */
+
 	.text :
 	{
 		. = ALIGN(4);
@@ -142,3 +154,11 @@ ASSERT( ADDR(.init) == 0x00000400,
  * stage-0). */
 ASSERT( (ADDR(.init) & 0x3FF) == 0,
         "stage-1 base must be 1 KB aligned — mtvec ignores the low bits" )
+
+/* The vector table must not grow into the header slot. */
+ASSERT( SIZEOF(.init) <= 0x100,
+        "stage-1 .init (vector table) has grown past 0x100 — it would overlap the image header" )
+ASSERT( ADDR(.stage1_hdr) == ORIGIN(FLASH) + 0x100 && SIZEOF(.stage1_hdr) == 16,
+        "stage-1 image header must be exactly 16 bytes at base + 0x100" )
+ASSERT( LOADADDR(.stage1_hdr) == ORIGIN(FLASH) + 0x100,
+        "stage-1 image header LOAD address must equal its VMA — check the AT()" )

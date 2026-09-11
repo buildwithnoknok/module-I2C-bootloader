@@ -52,10 +52,10 @@ CFLAGS = ('-g -Os -flto -ffunction-sections -fdata-sections -fmessage-length=0 '
           '-I. -I.. -I{cf} -I{cf}/../extralibs -I/usr/include/newlib').format(cf=CH32FUN)
 
 
-def build_fake(stage1_id, out, ld='fake_stage1.ld'):
+def build_fake(stage1_id, out, ld='fake_stage1.ld', src='fake_stage1.c'):
     """Compile the fake stage-1 with a given witness ID."""
     elf = out.replace('.bin', '.elf')
-    cmd = (f'riscv64-unknown-elf-gcc -o {elf} ../start.S fake_stage1.c '
+    cmd = (f'riscv64-unknown-elf-gcc -o {elf} ../start.S {src} '
            f'{CFLAGS} -DSTAGE1_ID={stage1_id:#010x} '
            f'-T {ld} -Wl,--gc-sections')
     subprocess.run(cmd, shell=True, cwd=HERE, check=True)
@@ -225,11 +225,7 @@ def main():
     place(img, CTRL_OFF,    ctrl,         'control block (marker STILL SET)')
     open(os.path.join(HERE, 'test_clear_cut.bin'), 'wb').write(img)
 
-    # ---- test_chain: the REAL stage-1, not a stub ---------------------------
-    # stage-0 -> real stage-1 -> application. Proves stage-0 hands off correctly
-    # to the actual bootloader, that stage-1 runs from 0x0400, validates the app
-    # against its metadata, and jumps to it. The "app" is the same witness
-    # harness relinked to the app base, so one read confirms the whole chain.
+    # The REAL stage-1, for the two tests that need it (chain, badapp).
     s1 = None
     for cand in ('../../noknok_stage1/noknok_stage1.bin',
                  '../../../stage1/noknok_stage1.bin'):
@@ -238,6 +234,29 @@ def main():
             s1 = open(p, 'rb').read()
             break
 
+    # ---- test_badapp: hardening C — an app with a VALID CRC that hangs every
+    # time. Real stage-1 + bad_app.c + valid metadata. The bad app stamps 0xBA
+    # into witness byte [attempt] and lets the watchdog reset it. After three
+    # attempts stage-1 must refuse to boot it and park at 0x7E with error 7.
+    # Witness page is left BLANK (FF) so the stamps can be programmed in.
+    if s1 is None:
+        print('\ntest_badapp.bin SKIPPED - build stage-1 first')
+    else:
+        bad = build_fake(0xBA, 'bad_app.bin', ld='fake_app.ld', src='bad_app.c')
+        print('\ntest_badapp.bin  (real stage-1 + an app that hangs every boot)')
+        img = blank()
+        place(img, 0,           stage0, 'stage-0')
+        place(img, STAGE1_BASE, s1,     'REAL stage-1')
+        place(img, APP_BASE,    bad,    'bad app (hangs)')
+        meta = struct.pack('<3I', 0xB007C0DE, len(bad), zlib.crc32(bad) & 0xffffffff)
+        place(img, META_OFF, meta, 'app metadata (VALID)')
+        open(os.path.join(HERE, 'test_badapp.bin'), 'wb').write(img)
+
+    # ---- test_chain: the REAL stage-1, not a stub ---------------------------
+    # stage-0 -> real stage-1 -> application. Proves stage-0 hands off correctly
+    # to the actual bootloader, that stage-1 runs from 0x0400, validates the app
+    # against its metadata, and jumps to it. The "app" is the same witness
+    # harness relinked to the app base, so one read confirms the whole chain.
     if s1 is None:
         print('\ntest_chain.bin SKIPPED - build stage-1 first')
     else:

@@ -33,6 +33,7 @@
  *     [0x06, len(4 LE), crc32(4 LE)]      VERIFY_STAGE1: CRC32 then arm update
  *     [0x05]                              BOOT (app, or reset to apply stage-1)
  *     [0xB1]                              GET_VERSION -> next read gives 4 bytes
+ *     [0xB3]                              GET_UID -> next read gives the 8-byte chip UID
  *   Master READ:  [state, last_error], or 4 version bytes after 0xB1.
  *
  * ── How a stage-1 update works ──────────────────────────────────────────────
@@ -104,8 +105,60 @@
 #define BL_MAGIC_CELL      (*(volatile uint32_t *)0x200007F0U)
 #define BL_MAGIC_ENTER     0x6E6B4231U             /* "nkB1" — stay in the BL   */
 
+/* App boot-attempt counter (DEV-31 hardening C). No-init RAM, in the same
+ * reserved 16 B as the handoff cell, so it survives a warm reset and nothing
+ * else writes it. Stage-1 counts every jump to the application; the app clears
+ * the cell the moment it has proved itself (I2C address assigned). If the count
+ * reaches APP_MAX_ATTEMPTS — three consecutive warm resets without the app ever
+ * getting healthy — stage-1 stops booting it and parks in flash mode with
+ * last_error = ERR_APP_UNHEALTHY, so the host can see why and push a good image.
+ *
+ * This is what turns "a broken app with a valid CRC is booted forever" into
+ * "a broken app is booted three times, then the module waits for help". It
+ * needs the app to run a watchdog, so a hang becomes a warm reset (the apps do).
+ * A cold power-on randomises the cell, which reads as 0: the user power-cycling
+ * gives the app another three tries, which is the right behaviour for a
+ * transient. A 0xB0 reset never counts — that path enters flash mode before
+ * jump_to_app() is reached. */
+#define APP_ATTEMPT_CELL   (*(volatile uint32_t *)0x200007F8U)
+#define APP_ATTEMPT_TAG    0xA5000000U
+#define APP_ATTEMPT_MASK   0xFF000000U
+#define APP_MAX_ATTEMPTS   3U
+#define ERR_APP_UNHEALTHY  7
+
 #define META_MAGIC         0xB007C0DEU
 #define CTRL_MAGIC         0x6E6B5530U             /* "nkU0" — update pending   */
+
+/* ── Stage-1 image header (DEV-31 hardening E) ──────────────────────────────
+ * 16 bytes at a FIXED offset of 0x100 from the image base, placed by stage1.ld
+ * just past the vector table. VERIFY_STAGE1 reads the same offset in a STAGED
+ * image and refuses to arm stage-0 unless it finds this header with the right
+ * base and layout. That closes the "wrong file" failure: an application image,
+ * a stage-1 built for a different MCU or a different flash layout, or plain
+ * garbage with a matching CRC (the host computes the CRC over whatever it was
+ * given) can no longer be installed as a bootloader. */
+#define HDR_OFFSET         0x100U
+#define HDR_MAGIC          0x31534B4EU             /* "NKS1" little-endian      */
+#define HDR_LAYOUT         1U                      /* CH32V003: 1K/3K/app@0x1000 */
+
+typedef struct {
+    uint32_t magic;       /* HDR_MAGIC                                        */
+    uint32_t base;        /* execution base this image is linked for          */
+    uint32_t layout;      /* HDR_LAYOUT — flash map this image assumes        */
+    uint32_t version;     /* (proto<<24)|(major<<16)|(minor<<8)|patch          */
+} stage1_hdr_t;
+
+__attribute__((section(".stage1_hdr"), used))
+const stage1_hdr_t stage1_hdr = {
+    HDR_MAGIC,
+    0x00000400U,          /* == STAGE1_BASE_EXEC; literal so the header is a
+                             plain constant, not something the linker relocates */
+    HDR_LAYOUT,
+    ((uint32_t)BL_PROTOCOL_VERSION << 24) | ((uint32_t)S1_VERSION_MAJOR << 16) |
+    ((uint32_t)S1_VERSION_MINOR   <<  8) |  (uint32_t)S1_VERSION_PATCH,
+};
+
+#define ERR_NOT_STAGE1     8       /* VERIFY_STAGE1: staged image has no valid header */
 
 /* Protocol commands */
 #define CMD_ERASE          0x01
@@ -114,6 +167,8 @@
 #define CMD_BOOT           0x05
 #define CMD_VERIFY_STAGE1  0x06
 #define CMD_GET_VERSION    0xB1
+#define CMD_GET_UID        0xB3   /* DEV-31 hardening D: next read = 8-byte chip UID */
+#define UID_ADDR           ((const volatile uint8_t *)0x1FFFF7E8U)   /* ESIG, 8 bytes */
 
 /* Status states */
 #define ST_IDLE            0
@@ -163,10 +218,11 @@ static volatile uint8_t  pend_boot   = 0;
 static volatile uint8_t  rx_buf[RX_BUF_SIZE];
 static volatile uint8_t  rx_len = 0;
 
-static volatile uint8_t  tx_buf[4];
+static volatile uint8_t  tx_buf[8];
 static volatile uint8_t  tx_idx = 0;
-static volatile uint8_t  tx_len = 2;   /* 2 = [state,err]; 4 after GET_VERSION */
+static volatile uint8_t  tx_len = 2;   /* 2 = [state,err]; 4 after GET_VERSION; 8 after GET_UID */
 static volatile uint8_t  version_pending = 0;
+static volatile uint8_t  uid_pending     = 0; /* set in ISR on 0xB3; next read returns the UID */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * CRC32  (standard zlib: poly 0xEDB88320, init 0xFFFFFFFF, final XOR)
@@ -291,8 +347,17 @@ static int stage1_update_pending(void)
     return CTRL->magic == CTRL_MAGIC;
 }
 
+static uint32_t app_attempts(void)
+{
+    uint32_t c = APP_ATTEMPT_CELL;
+    return ((c & APP_ATTEMPT_MASK) == APP_ATTEMPT_TAG) ? (c & 0xFFU) : 0U;
+}
+
 static void jump_to_app(void)
 {
+    /* Count this attempt. The app clears the cell once it is healthy. */
+    APP_ATTEMPT_CELL = APP_ATTEMPT_TAG | (app_attempts() + 1U);
+
     __disable_irq();
     RCC->APB1PRSTR |=  RCC_APB1Periph_I2C1;
     RCC->APB1PRSTR &= ~RCC_APB1Periph_I2C1;
@@ -361,6 +426,13 @@ void I2C1_EV_IRQHandler(void)
                 tx_buf[2] = S1_VERSION_MINOR;
                 tx_buf[3] = S1_VERSION_PATCH;
                 tx_len    = 4;
+            } else if (uid_pending) {
+                /* Same 8 bytes, same order, as the app's enumeration reply —
+                 * so the host can match a module parked here to the type it
+                 * enumerated as, and push the right application. */
+                uid_pending = 0;
+                for (uint8_t i = 0; i < 8; i++) tx_buf[i] = UID_ADDR[i];
+                tx_len = 8;
             } else {
                 tx_buf[0] = bl_state;
                 tx_buf[1] = last_error;
@@ -408,6 +480,9 @@ void I2C1_EV_IRQHandler(void)
                 break;
             case CMD_GET_VERSION:
                 version_pending = 1;
+                break;
+            case CMD_GET_UID:
+                uid_pending = 1;
                 break;
             default:
                 break;
@@ -467,6 +542,7 @@ static void do_verify(void)
     uint32_t crc = (uint32_t)rx_buf[5] | ((uint32_t)rx_buf[6] << 8) |
                    ((uint32_t)rx_buf[7] << 16) | ((uint32_t)rx_buf[8] << 24);
     flash_write_meta(len, crc);
+    APP_ATTEMPT_CELL = 0;         /* a freshly installed app gets a clean slate */
     bl_state = ST_READY;
 }
 
@@ -476,6 +552,17 @@ static void do_verify_stage1(void)
 {
     uint32_t len;
     if (!staged_crc_ok(&len, STAGE1_REGION_LEN)) return;
+
+    /* CRC matched — so the host sent what it meant to. Now: is it actually a
+     * stage-1 for THIS layout? Read the header at the fixed offset. */
+    const volatile stage1_hdr_t *h =
+        (const volatile stage1_hdr_t *)(APP_BASE_FLASH + HDR_OFFSET);
+    if (len < HDR_OFFSET + sizeof(stage1_hdr_t) ||
+        h->magic  != HDR_MAGIC ||
+        h->base   != 0x00000400U ||
+        h->layout != HDR_LAYOUT) {
+        bl_state = ST_ERROR; last_error = ERR_NOT_STAGE1; return;
+    }
 
     uint32_t crc = (uint32_t)rx_buf[5] | ((uint32_t)rx_buf[6] << 8) |
                    ((uint32_t)rx_buf[7] << 16) | ((uint32_t)rx_buf[8] << 24);
@@ -494,14 +581,26 @@ int main(void)
     uint32_t magic = BL_MAGIC_CELL;
     BL_MAGIC_CELL  = 0;                   /* consume the handoff flag */
 
-    if (magic != BL_MAGIC_ENTER && app_is_valid())
-        jump_to_app();                    /* never returns */
+    uint8_t app_unhealthy = 0;
+    if (magic != BL_MAGIC_ENTER && app_is_valid()) {
+        if (app_attempts() < APP_MAX_ATTEMPTS)
+            jump_to_app();                /* never returns */
+        /* Valid app, but it has crashed its way back here APP_MAX_ATTEMPTS
+         * times without ever clearing the counter. Stop booting it: park in
+         * flash mode and say why, so the host can push a good image. */
+        app_unhealthy = 1;
+    }
 
     /* ── FLASH MODE ── */
     flash_unlock();
     led_init();
     i2c_slave_init(BL_I2C_ADDR);
     bl_state = ST_IDLE;
+    if (app_unhealthy) {
+        /* Visible on the first READ_STATUS. Any command clears it, so a normal
+         * ERASE -> WRITE -> VERIFY -> BOOT proceeds unhindered. */
+        bl_state = ST_ERROR; last_error = ERR_APP_UNHEALTHY;
+    }
 
     __enable_irq();
 
