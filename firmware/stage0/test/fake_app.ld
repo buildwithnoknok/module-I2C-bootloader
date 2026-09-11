@@ -1,7 +1,7 @@
 /* Linker for the fake APPLICATION used in the boot-chain test (DEV-31).
  *
  * Same witness harness as fake_stage1.c, but linked at the application base
- * (0x1000) so it can stand in for a real module app. Used to prove the full
+ * (0x1400) so it can stand in for a real module app. Used to prove the full
  * chain: stage-0 -> real stage-1 -> application.
  *
  * Reuses stage-0's minimal start.S, so the no-.data / no-.bss constraint applies.
@@ -11,7 +11,7 @@ ENTRY( InterruptVector )
 
 MEMORY
 {
-	FLASH (rx) : ORIGIN = 0x00001000, LENGTH = 12160  /* app region to 0x3F7F  */
+	FLASH (rx) : ORIGIN = 0x00001400, LENGTH = 11136  /* app region to 0x3F7F  */
 	RAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 2032   /* 2 KB - 16 B (handoff) */
 }
 
@@ -101,4 +101,4 @@ SECTIONS
 
 ASSERT( SIZEOF(.data) == 0, "fake app must have no .data — start.S does not copy it" )
 ASSERT( SIZEOF(.bss)  == 0, "fake app must have no .bss — start.S does not zero it" )
-ASSERT( ADDR(.init) == 0x00001000, "fake app must start at the application base" )
+ASSERT( ADDR(.init) == 0x00001400, "fake app must start at the application base (0x1400, layout 2)" )

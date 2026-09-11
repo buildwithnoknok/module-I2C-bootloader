@@ -1,7 +1,7 @@
 /* Linker for the fake stage-1 bench harness (DEV-31).
  *
  * Linked at 0x0400 — the stage-1 base that stage-0 jumps to and copies into.
- * Region length 0x0C00 = app_base (0x1000) - stage1_base (0x0400).
+ * Region length 0x1000 = app_base (0x1400) - stage1_base (0x0400).
  *
  * Reuses stage-0's minimal start.S, so the same no-.data / no-.bss constraint
  * applies and is asserted below.
@@ -11,7 +11,7 @@ ENTRY( InterruptVector )
 
 MEMORY
 {
-	FLASH (rx) : ORIGIN = 0x00000400, LENGTH = 3072   /* stage-1 region        */
+	FLASH (rx) : ORIGIN = 0x00000400, LENGTH = 4096   /* stage-1 region        */
 	RAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 2032   /* 2 KB - 16 B (handoff) */
 }
 

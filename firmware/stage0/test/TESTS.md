@@ -23,8 +23,12 @@ with the LED Button on its I2C bus, a pull-up source on the bus (a legacy buzzer
 doubles as the "other module" for step 6), the bench files listed at the top of `regress_all.sh`
 on the Pico. Read protection on the LED Button must be off.
 
-The runner **builds stage-0 and stage-1 from source** first (three stage-1 versions 1.0.0 /
-1.0.1 / 1.0.2), so it tests what is checked out, not whatever binaries were lying around.
+The runner **builds stage-0, stage-1 and the LED Button app from source** first (three stage-1
+versions PATCH 0 / 1 / 2 of whatever `S1_VERSION_*` says, e.g. 1.1.0 / 1.1.1 / 1.1.2; the
+full restore image is assembled by `mk_full.py`), so it tests what is checked out, not
+whatever binaries were lying around. Layout constants (app base `0x1400`) live in
+`mk_full.py`, `build_test_images.py`, `fake_app.ld`, `fake_stage1.ld` — keep them in step
+with `noknok_stage1.c` and the apps' `app.ld`.
 
 **The runner reboots the module many times over SWD with no Conductor running.** That is
 only harmless because stage-1 continues the app boot-attempt series (hardening C) **across
@@ -56,18 +60,18 @@ marker are read back and compared.
 | `stage_corrupt` | one flipped byte in the staged image, descriptor CRC valid (hardening A) | gate 3 refuses; marker left set | witness A1, marker `6E6B5530` |
 | `chain` | stage-0 + **real** stage-1 + a fake app (writes A3) | the whole boot chain stage-0 → stage-1 → app | witness A3, marker FF |
 
-The runner then flashes the **full image** (stage-0 + stage-1 v1.0.1 + LED Button app) so the
+The runner then flashes the **full image** (stage-0 + stage-1 PATCH+1 + LED Button app) so the
 board is back to a product state. A "marker left set" after a refusal is by design: the next boot re-checks, and stage-1 can rewrite it. A FAIL here is a stage-0 or control-block regression — the
 worst kind, because stage-0 cannot be fixed in the field. Hardening B (retry-by-reset) is code-
 reviewed only; a flash failure cannot be provoked on demand.
 
 ## Step 2 — `i2c` · stage-1 updates itself over the bus (`i2c_regress.sh` → `bench_stage1.py`)
 
-SWD-flashes stage-0 + stage-1 **v1.0.0** with no app (module sits at `0x7E`). The Pico then
-runs the raw `module_flasher` sequence: `GET_VERSION` → 1.0.0, transfer v1.0.1 into staging,
-`VERIFY_STAGE1`, `BOOT`, wait for `0x7E` to disappear *and reappear*, `GET_VERSION` → 1.0.1.
+SWD-flashes stage-0 + the base stage-1 build with no app (module sits at `0x7E`). The Pico then
+runs the raw `module_flasher` sequence: `GET_VERSION`, transfer the PATCH+1 build into staging,
+`VERIFY_STAGE1`, `BOOT`, wait for `0x7E` to disappear *and reappear*, `GET_VERSION` → PATCH+1.
 Then the Pi reads the stage-1 region back over SWD and compares it byte-for-byte with the
-v1.0.1 file, and checks the control block was cleared and the staging area erased. Restores
+pushed file, and checks the control block was cleared and the staging area erased. Restores
 the full image afterwards.
 
 Proves: the real protocol end to end (`0x06`, `0xB1`, the header at `+0x100`, the disappear/
@@ -77,8 +81,8 @@ stage-0 copy bug; a FAIL earlier is a stage-1 protocol bug or a `module_flasher.
 ## Step 3 — `conductor` · the product path (`bench_conductor_stage1.py`)
 
 Starts from a running app. `Conductor.bootloader_version()` (drops the module into its
-bootloader, asks `0xB1`, boots it back) → `Conductor.stage1_update(entry, v1.0.2, app_image)`
-→ `bootloader_version()` again → 1.0.2, and the app is enumerated again at its old address.
+bootloader, asks `0xB1`, boots it back) → `Conductor.stage1_update(entry, PATCH+2 build, app_image)`
+→ `bootloader_version()` again → PATCH+2, and the app is enumerated again at its old address.
 
 Proves: what the noknok app will actually call, including the app-restore step (a stage-1
 update overwrites the app region, so the Conductor must reflash the app). A FAIL here with
@@ -120,7 +124,7 @@ found on 11 Sep 2026: `_save_state()` replaced the file), and the UID-based resc
 end to end. A FAIL at "forgotten" is `_save_state()`; a FAIL at "did not reflash" is
 `rescue_parked_module()` or `GET_UID` in stage-1.
 
-**Board state after a full pass:** stage-0 + stage-1 v1.0.0 (the `badapp` image embeds the plain build) + LED Button app, enumerated. Run `regress_all.sh` again any time — every step sets up its own start state.
+**Board state after a full pass:** stage-0 + the base stage-1 build (the `badapp` image embeds it) + LED Button app, enumerated. Run `regress_all.sh` again any time — every step sets up its own start state.
 
 ---
 

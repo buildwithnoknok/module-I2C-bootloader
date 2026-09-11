@@ -19,7 +19,7 @@
  * Expect after ~7 s: witness bytes [1] [2] [3] == BA, byte [4] == FF (never a
  * fourth run), and the module answering at 0x7E with status [3, 7].
  *
- * Linked at 0x1000 (fake_app.ld), reuses stage-0's minimal start.S.
+ * Linked at 0x1400 (fake_app.ld), reuses stage-0's minimal start.S.
  */
 
 #include "ch32fun.h"

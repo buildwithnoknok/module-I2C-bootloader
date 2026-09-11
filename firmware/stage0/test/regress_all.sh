@@ -20,9 +20,9 @@
 # The stage-1 payloads are built and pushed by this script.
 #
 # ORDER MATTERS — each step leaves the board in a state the next one relies on:
-#   1 swd       ends: board restored (full image, stage-1 v1.0.1, app)   [~60 s]
-#   2 i2c       flashes its own start image (v1.0.0); ends restored       [~30 s]
-#   3 conductor needs a running app + a DIFFERENT stage-1 (pushes v1.0.2) [~15 s]
+#   1 swd       ends: board restored (full image, stage-1 v1.1.1, app)   [~60 s]
+#   2 i2c       flashes its own start image (v1.1.0); ends restored       [~30 s]
+#   3 conductor needs a running app + a DIFFERENT stage-1 (pushes v1.1.2) [~15 s]
 #   4 wrongfile needs a running app; ends restored                        [~15 s]
 #   5 badapp    flashes a hanging app; ends PARKED at 0x7E (error 7)      [~25 s]
 #   6 merge     needs a parked module + its UID in noknok_state.json
@@ -33,6 +33,8 @@ T=/home/noknok/dev/ch32fun/noknok_stage0/test
 S1=/home/noknok/dev/ch32fun/noknok_stage1
 P=/home/noknok/dev/pico
 M=/home/noknok/dev/ch32fun/minichlink/minichlink
+APP=/home/noknok/dev/ch32fun/noknok_keyboard        # LED Button app build dir (module-I2C-ledbutton/firmware/src)
+FULL=$S1/full_stage_ledbutton.bin                    # restore image, rebuilt every run
 
 # lines of Conductor enumeration chatter to strip from the per-step summaries
 QC='Enumerating\|already assigned\|^Done\|No new modules\|^  Noknok\|^  noknok'
@@ -57,8 +59,8 @@ done
 echo "LinkE, Pico (+ bench files), chip: ok"
 
 # -- build everything from SOURCE so we test what is committed, not leftovers --
-# Three stage-1 versions: v1.0.0 = start state for the I2C test, v1.0.1 = its
-# payload and the version in the "full" restore image, v1.0.2 = the Conductor
+# Three stage-1 versions: v1.1.0 = start state for the I2C test, v1.1.1 = its
+# payload and the version in the "full" restore image, v1.1.2 = the Conductor
 # test's payload (it must differ from what is installed, or nothing is proven).
 echo "=== build ==="
 build_s1() {  # build_s1 <patch> <out.bin>   (run inside $S1)
@@ -71,13 +73,19 @@ build_s1() {  # build_s1 <patch> <out.bin>   (run inside $S1)
   || { tail -5 /tmp/build_s0.log; echo "FAIL: stage-0 build"; exit 2; }
 ( cd $S1 && build_s1 0 s1_0400_v100.bin && build_s1 1 s1_0400_v101.bin && build_s1 2 s1_0400_v102.bin \
     && cp s1_0400_v100.bin noknok_stage1.bin \
-    && ls -l s1_0400_v100.bin | awk '{print "stage-1:", $5, "B (built as v1.0.0 / v1.0.1 / v1.0.2)"}' \
-    && python3 mk_full.py ) || { echo "FAIL: stage-1 build"; exit 2; }
+    && ls -l s1_0400_v100.bin | awk '{print "stage-1:", $5, "B (built as v1.1.0 / v1.1.1 / v1.1.2)"}' \
+    ) || { echo "FAIL: stage-1 build"; exit 2; }
+( cd $APP && make clean >/dev/null 2>&1 && make build >/tmp/build_app.log 2>&1 \
+    && ls -l keyboard_firmware.bin | awk '{print "LED Button app:", $5, "B"}' ) \
+  || { tail -5 /tmp/build_app.log; echo "FAIL: LED Button app build"; exit 2; }
+python3 $T/mk_full.py $T/../noknok_stage0.bin $S1/s1_0400_v101.bin $APP/keyboard_firmware.bin $FULL || exit 2
+cp $APP/keyboard_firmware.bin $P/keyboard_firmware.bin
+( cd $P && ./pico.py put keyboard_firmware.bin >/dev/null ) || { echo "FAIL: could not push the app to the Pico"; exit 2; }
 cp $S1/s1_0400_v101.bin $P/noknok_stage1_v101.bin
 cp $S1/s1_0400_v102.bin $P/noknok_stage1_new.bin
 ( cd $P && ./pico.py put noknok_stage1_v101.bin >/dev/null && ./pico.py put noknok_stage1_new.bin >/dev/null ) \
   || { echo "FAIL: could not push payloads to the Pico"; exit 2; }
-echo "payloads on the Pico: v1.0.1 (i2c step), v1.0.2 (conductor step)"
+echo "payloads on the Pico: v1.1.1 (i2c step), v1.1.2 (conductor step)"
 
 # -- 1. stage-0 SWD suite (10 images: jump, update, all power-loss windows, attacks) --
 run swd "cd $T && python3 build_test_images.py >/dev/null 2>&1 \
@@ -86,7 +94,7 @@ run swd "cd $T && python3 build_test_images.py >/dev/null 2>&1 \
 
 # -- 2. stage-1 self-update over I2C, SWD cross-checked ------------------------
 run i2c "sh $T/i2c_regress.sh 2>&1 | tee /tmp/i2c.log \
-  | grep -E 'v1\.0\.|region ==|control block|MISMATCH|restored|FAIL' \
+  | grep -E 'v1\.[0-9]\.|region ==|control block|MISMATCH|restored|FAIL' \
   && grep -q 'ALL PASS' /tmp/i2c.log && grep -q 'region ==' /tmp/i2c.log"
 
 # -- 3. the product path: Conductor.stage1_update() with app restore ----------

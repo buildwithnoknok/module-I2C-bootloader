@@ -15,8 +15,8 @@
  *
  * ── Flash map (16 KB) ───────────────────────────────────────────────────────
  *   0x0000_0000  STAGE-0       1 KB     frozen; applies stage-1 updates
- *   0x0000_0400  STAGE-1       3 KB     this code — updatable via stage-0
- *   0x0000_1000  APPLICATION   ~11.9 KB flashed over I2C; also the STAGING area
+ *   0x0000_0400  STAGE-1       4 KB     this code — updatable via stage-0
+ *   0x0000_1400  APPLICATION   ~10.9 KB flashed over I2C; also the STAGING area
  *   0x0000_3F80  CONTROL BLOCK 64 B     stage-1 update marker, read by stage-0
  *   0x0000_3FC0  METADATA      64 B     {magic, app_len, app_crc32}
  *
@@ -73,7 +73,7 @@
 #define S1_VERSION_MAJOR    1
 #endif
 #ifndef S1_VERSION_MINOR
-#define S1_VERSION_MINOR    0
+#define S1_VERSION_MINOR    1   /* 1.1.0: layout 2, app at 0x1400 */
 #endif
 #ifndef S1_VERSION_PATCH
 #define S1_VERSION_PATCH    0
@@ -81,22 +81,22 @@
 
 /* Flash layout (flash-controller alias 0x08000000) */
 #define STAGE1_BASE_FLASH  0x08000400U   /* where this code lives; 1 KB-aligned */
-#define APP_BASE_EXEC      0x00001000U
-#define APP_BASE_FLASH     0x08001000U
+#define APP_BASE_EXEC      0x00001400U   /* moved from 0x1000 on 11 Sep 2026 */
+#define APP_BASE_FLASH     0x08001400U   /* (layout 2) — stage-1 gets 4 KB   */
 
 /* Two different lengths, deliberately:
  *   APP_REGION_LEN  how many bytes an APPLICATION may occupy. Stops at the
  *                   control block so an oversized app can never overwrite the
  *                   stage-1 update marker. Bounds WRITE_CHUNK and the CRC.
- *   APP_ERASE_LEN   how much ERASE actually clears — the whole 12 KB through
+ *   APP_ERASE_LEN   how much ERASE actually clears — the whole 11 KB through
  *                   the end of flash, so the control block and the app metadata
  *                   are both wiped when a fresh image is loaded.
  * They differ by 128 B (the control block + metadata pages). Keeping them as
  * separate named constants makes that intentional rather than a rounding
  * accident in the erase loop. */
-#define APP_REGION_LEN     (0x3F80U - 0x1000U)      /* 12160 B usable          */
-#define APP_ERASE_LEN      (0x4000U - 0x1000U)      /* 12 KB, 12 x 1 KB pages  */
-#define STAGE1_REGION_LEN  (APP_BASE_FLASH - STAGE1_BASE_FLASH)  /* 3 KB      */
+#define APP_REGION_LEN     (0x3F80U - 0x1400U)      /* 11136 B usable          */
+#define APP_ERASE_LEN      (0x4000U - 0x1400U)      /* 11 KB, 11 x 1 KB pages  */
+#define STAGE1_REGION_LEN  (APP_BASE_FLASH - STAGE1_BASE_FLASH)  /* 4 KB      */
 #define META_FLASH         (0x08000000U + 0x3FC0U)  /* app validity marker      */
 #define META_ERASE_PAGE    (0x08000000U + 0x3C00U)  /* 1 KB page holding it     */
 #define CTRL_FLASH         (0x08000000U + 0x3F80U)  /* stage-1 update control   */
@@ -142,7 +142,7 @@
  * given) can no longer be installed as a bootloader. */
 #define HDR_OFFSET         0x100U
 #define HDR_MAGIC          0x31534B4EU             /* "NKS1" little-endian      */
-#define HDR_LAYOUT         1U                      /* CH32V003: 1K/3K/app@0x1000 */
+#define HDR_LAYOUT         2U                      /* CH32V003: 1K/4K/app@0x1400 (1 was 1K/3K/app@0x1000) */
 
 typedef struct {
     uint32_t magic;       /* HDR_MAGIC                                        */

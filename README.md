@@ -15,7 +15,7 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 >
 > **Stage-0 / stage-1 split (Sep 2026, DEV-31):** built and SWD-bench-validated — 4/4
 > tests, including recovery from a deliberately half-written stage-1. Stage-0 is 704 B
-> in a frozen 1 KB reservation; stage-1 is 2908 B in 3 KB. **Validated over I²C on
+> in a frozen 1 KB reservation; stage-1 is 2928 B in **4 KB** (layout 2 since 11 Sep 2026 — the app base moved from `0x1000` to `0x1400`). **Validated over I²C on
 > 11 Sep 2026** — a real stage-1 self-update v1.0.0 → v1.0.1 over the bus, confirmed from
 > both the I²C and SWD sides. `firmware/src/` (the monolithic bootloader) is still what every
 > existing module runs until they are re-flashed.
@@ -36,14 +36,19 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 | Region | Address | Size | Written by | Notes |
 |--------|---------|------|-----------|-------|
 | **Stage-0** | `0x0000_0000` | 1 KB | SWD (once) | Runs first on every reset. **Frozen forever.** Measured 704 B. |
-| **Stage-1** | `0x0000_0400` | 3 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2908 B. **Base must be 1 KB aligned** (mtvec). |
-| Application | `0x0000_1000` | ~11.9 KB | I²C OTA | The module's real firmware, linked at the `0x1000` offset. |
+| **Stage-1** | `0x0000_0400` | 4 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2928 B (v1.1.0). **Base must be 1 KB aligned** (mtvec). |
+| Application | `0x0000_1400` | ~10.9 KB | I²C OTA | The module's real firmware, linked at the `0x1400` offset (layout 2). |
 | **Control block** | `0x0000_3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Update marker + staging descriptor + `app_base`. |
 | Metadata | `0x0000_3FC0` | 64 B | I²C OTA | Validity marker: `{magic, app_length, app_crc32}`. |
 
-The split fits inside the **existing 4 KB bootloader reservation**, so the application
-base stays at `0x1000` and **module applications need no relinking** — the split is
-invisible to them.
+**Layout 2 (11 Sep 2026):** the bootloader reservation is **5 KB** — 1 KB stage-0 + 4 KB stage-1
+— and every application is linked at `0x1400`. Layout 1 (3 KB stage-1, app at `0x1000`, the
+legacy monolithic bootloader's base) was outgrown after the DEV-31 hardening left 164 B in
+stage-1 with the DEV-22 flashing-interface work still to land. Stage-0 needed no change — it
+reads the app base from the control block — and the stage-1 image header carries the layout
+id (`2`), so a layout-1 image can never be installed on a layout-2 module or vice versa
+(`VERIFY_STAGE1` error 8). An app linked at `0x1400` will not run under the legacy monolithic
+bootloader, and vice versa: the whole fleet moves together (SWD, once).
 
 The flash controller addresses flash via the `0x0800_0000` alias; execution/reset
 uses the `0x0000_0000` alias.
@@ -63,7 +68,7 @@ everything about the application stays stage-1's job.
 **Stage-1** — behaviour unchanged
 
 1. Handoff magic set in no-init RAM (`0x200007F0`)? → **flash mode** (app asked for update).
-2. Else `CRC32(app) == metadata.crc32`? → **jump to app** (`0x1000`).
+2. Else `CRC32(app) == metadata.crc32`? → **jump to app** (`0x1400`).
 3. Else → **flash mode** (blank/corrupt chip → safe recovery).
 
 A half-flashed or blank module always lands safely in the bootloader. **Stage-0 never
@@ -119,11 +124,11 @@ this project.
 
 ```sh
 cd firmware/stage0 && make build   # → noknok_stage0.bin  (704 B / 1 KB)
-cd firmware/stage1 && make build   # → noknok_stage1.bin  (2908 B / 3 KB)
+cd firmware/stage1 && make build   # → noknok_stage1.bin  (2928 B / 4 KB)
 ```
 
 Layouts are set by `stage0/stage0.ld` (`ORIGIN 0x0000`, 1 KB) and
-`stage1/stage1.ld` (`ORIGIN 0x0400`, 3072 B). Both linker scripts `ASSERT` their
+`stage1/stage1.ld` (`ORIGIN 0x0400`, 4096 B). Both linker scripts `ASSERT` their
 start address, so a mismatched pair fails the build rather than producing a stage-0
 that jumps into nothing.
 
@@ -159,7 +164,7 @@ The legacy monolithic bootloader still builds from `firmware/src/`
 The **5-pin SWIO header** (`GND, SWIO, RST, VCC`) is the unbrickable hardware
 backstop. It talks to the RISC-V debug module directly — independent of flash
 contents — so it works even when flash is blank or corrupt. I²C OTA can **never**
-permanently brick a module: the flasher refuses to write below `0x1000` (the
+permanently brick a module: the flasher refuses to write below the app base (the
 bootloader's own region) and only writes the validity marker after a full,
 CRC-verified flash, so a failed or interrupted OTA simply leaves the module waiting
 safely in the bootloader at `0x7E`.
@@ -193,8 +198,8 @@ board and to recover from almost any failure.**
 
 ### 2. SWD-flash an application directly (skip the Pico)
 
-The application is linked at the `0x1000` offset, so it must be written at flash
-address **`0x0800_1000`** — *not* `0x0800_0000` (that would overwrite the
+The application is linked at the `0x1400` offset (layout 2; `0x1000` under the legacy monolithic bootloader), so it must be written at flash
+address **`0x0800_1400`** — *not* `0x0800_0000` (that would overwrite the
 bootloader). The bootloader will also only jump to the app once a valid **metadata
 marker** exists at `0x0800_3FC0`, which a bare SWD app-write does not create.
 
@@ -229,12 +234,13 @@ USB-C modules (CH32V203) use the separate
 [module-USB-bootloader](https://github.com/buildwithnoknok/module-USB-bootloader),
 which gets the same stage-0 / stage-1 treatment with its own layout.
 
-Each module's application must be **relinked at the `0x1000` offset** and reserve
+Each module's application must be **relinked at the `0x1400` offset** (layout 2) and reserve
 the top 16 bytes of RAM for the handoff cell. See the design doc for details.
 
-**The stage-0 split changes nothing for module applications.** The app base is still
-`0x1000` and the bootloader still occupies the same 4 KB reservation — the split is
-internal to it. Existing relinked apps run unmodified under stage-1.
+**Layout 2 moved the app base** from `0x1000` (legacy bootloader / layout 1) to `0x1400`. Apps
+built before 11 Sep 2026 must be rebuilt from source with the current `app.ld`; the module
+READMEs list the first version on the new layout (LED Button 2.4.0, Buzzer 3.5.0, Knob 2.3.0,
+Display 0.5.0).
 
 ## Flashing a factory / read-protected board
 

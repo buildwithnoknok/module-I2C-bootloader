@@ -53,7 +53,7 @@ check stage_corrupt  a1 6e6b5530
 # Restore the board. The last test leaves a FAKE app installed that does not
 # enumerate — walking away like that cost a confused Conductor test on 11 Sep.
 # If a full production image is available next to the stage-1 build, flash it.
-RESTORE=../../noknok_stage1/full_stage_ledbutton.bin
+RESTORE=../../noknok_stage1/full_stage_ledbutton.bin   # built by regress_all.sh via mk_full.py
 if [ -f "$RESTORE" ]; then
   $M -w "$RESTORE" flash -b >/dev/null 2>&1 && echo "board restored from $RESTORE"
 else

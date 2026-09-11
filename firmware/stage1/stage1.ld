@@ -4,7 +4,7 @@
  * stage-0 can sit below it and replace it in the field.
  *
  *   ORIGIN 0x0400 = the stage-0 reservation (1 KB, frozen — see stage0.ld)
- *   LENGTH 3072   = app_base (0x1000) - stage1_base (0x0400)
+ *   LENGTH 4096   = app_base (0x1400) - stage1_base (0x0400)   (was 3072 / 0x1000)
  *
  * Unlike stage-0, stage-1 DOES link ch32fun.c: it needs the interrupt vector
  * table for the I2C slave handlers.
@@ -18,7 +18,7 @@ ENTRY( InterruptVector )
 
 MEMORY
 {
-	FLASH (rx) : ORIGIN = 0x00000400, LENGTH = 3072   /* 3 KB stage-1          */
+	FLASH (rx) : ORIGIN = 0x00000400, LENGTH = 4096   /* 4 KB stage-1          */
 	RAM (xrw)  : ORIGIN = 0x20000000, LENGTH = 2032   /* 2 KB - 16 B (handoff) */
 }
 

@@ -10,7 +10,7 @@
 #   test_jump.bin    stage-0 + fake stage-1 "A1" installed at 0x0400, no update
 #                    pending.  EXPECT witness == 0xA1  (stage-0 jumped to it)
 #
-#   test_update.bin  same, PLUS fake stage-1 "A2" staged at 0x1000 and a valid
+#   test_update.bin  same, PLUS fake stage-1 "A2" staged at APP_BASE and a valid
 #                    control block at 0x3F80.
 #                    EXPECT witness == 0xA2, stage-1 region == A2, marker cleared
 #                    (stage-0 applied the pending update, then booted the result)
@@ -39,7 +39,7 @@ CH32FUN = find_ch32fun(HERE)
 
 FLASH_SIZE   = 0x4000
 STAGE1_BASE  = 0x0400          # execution/file offset — MUST be 1 KB aligned (mtvec)
-APP_BASE     = 0x1000
+APP_BASE     = 0x1400          # layout 2 (11 Sep 2026); was 0x1000
 CTRL_OFF     = 0x3F80
 META_OFF     = 0x3FC0
 WITNESS      = 0x3C00
@@ -142,7 +142,7 @@ def main():
     # The witness is pre-cleared to 0x00 in all of them so a stale value from an
     # earlier test cannot masquerade as a pass.
 
-    # Window 1 — cut during the STAGING transfer: half an image at 0x1000, and no
+    # Window 1 — cut during the STAGING transfer: half an image at APP_BASE, and no
     # marker (stage-1 only writes the marker after a full CRC-verified transfer).
     # Expect: stage-0 sees no marker, boots the installed A1 untouched.
     print('\ntest_stage_cut.bin  (power cut mid-staging: partial image, no marker)')

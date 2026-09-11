@@ -5,7 +5,7 @@ Copyright (c) noknok
 
 # Stage-0 / Stage-1 Bootloader Split — Design Spec
 
-**Status:** implemented and validated over I²C (11 Sep 2026); frozen layout 1 KB / `0x0400` · **Jira:** DEV-31 · **Target:** CH32V003 (CH32V203 variant at the end)
+**Status:** implemented and validated over I²C (11 Sep 2026); frozen stage-0 1 KB / stage-1 at `0x0400`; **layout 2** (stage-1 4 KB, app `0x1400`) since 11 Sep 2026 · **Jira:** DEV-31 · **Target:** CH32V003 (CH32V203 variant at the end)
 
 This is the design for making the noknok module **bootloader itself** field-updatable.
 Everything else on a module already is: the payload firmware updates over I2C/USB, and
@@ -41,13 +41,21 @@ works for USB (where a receiver would mean carrying a whole USB stack in the fro
 | Region | Address | Size | Written by | Mutable in field |
 |---|---|---|---|---|
 | **Stage-0** | `0x0000` | 1 KB (704 B used) | SWD, once at manufacture | **Never** |
-| **Stage-1** | `0x0400` | 3 KB (2612 B used) | stage-0, from staging | Yes |
-| **Application** | `0x1000` | 12 KB − 128 B | stage-1, over the bus | Yes |
+| **Stage-1** | `0x0400` | **4 KB** (2928 B used, v1.1.0) | stage-0, from staging | Yes |
+| **Application** | `0x1400` | 11 KB − 128 B (11136 B) | stage-1, over the bus | Yes |
 | **BL control block** | `0x3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Yes |
 | **App metadata** | `0x3FC0` | 64 B | stage-1 | Yes |
 
-The whole split fits inside the **existing 4 KB bootloader reservation**, so the
-application base stays at `0x1000` and **existing module apps need no relinking**.
+**Layout history.** Layout 1 (10–11 Sep 2026) kept the split inside the legacy 4 KB
+reservation: stage-1 3 KB, app at `0x1000`, existing apps unchanged. The DEV-31 hardening
+round took stage-1 to 2908 B (164 B free) with DEV-22's flashing-interface logic still to
+come, so on 11 Sep 2026 Christopher approved growing it: **layout 2** = stage-1 **4 KB**,
+app base **`0x1400`**, all four apps relinked (LED Button 2.4.0, Buzzer 3.5.0, Knob 2.3.0,
+Display 0.5.0). Stage-0 was not touched — it reads the app base from the control block,
+which is exactly the property this section was written to guarantee. The stage-1 image
+header's layout id went 1 → 2 so `VERIFY_STAGE1` refuses a cross-layout image (error 8).
+The fleet was clean-slate, so no field migration was needed; the runbook's combined
+"new stage-1 + new app" transaction remains the procedure if a layout ever moves again.
 
 The control block and app metadata are two separate 64-byte pages inside the same 1 KB
 sector. Keeping them separate means stage-0 can clear the update marker without
@@ -59,9 +67,9 @@ destroying app metadata — which relies on 64-byte erase granularity (validated
 from the control block** — including the application base and the staging address.
 
 This is what keeps DEV-31's question 2 answered "yes": a future OTA *can* enlarge the
-bootloader reservation (e.g. stage-1 `0x0400`→`0x1800`, trading payload space), because
+bootloader reservation (as layout 2 did: stage-1 3 → 4 KB, trading payload space), because
 stage-0 never assumes where the application lives. Such a resize is necessarily a
-combined "new stage-1 + new app" transaction, since an app linked at `0x1000` cannot run
+combined "new stage-1 + new app" transaction, since an app linked at one base cannot run
 at a different base. The permanent floor is stage-0's own 1 KB.
 
 ### Control block layout (`0x3F80`, 64 B)
@@ -370,7 +378,7 @@ end to end**. USB raises `NotImplementedError` until the CH32V203 port.
 
 Source: `firmware/stage1/`. Relinked from `0x0000` to `0x0400`, derived from the
 hardware-validated monolithic bootloader; **the application-flashing path is unchanged**.
-Builds to **2908 B in the 3 KB region** (164 B free), 96 B RAM, after hardening C/D/E
+Builds to **2928 B in the 4 KB region** (1168 B free; layout 2), 96 B RAM, after hardening C/D/E
 below (it was 2600 B before).
 
 The design principle for the new commands: **a stage-1 update is the same transfer as an
@@ -418,7 +426,7 @@ if the reset was *not* `IWDGRSTF` — power-on, software, SWD, NRST — the cell
 So "unhealthy" means exactly *three watchdog resets in a row*. The original "count every warm
 boot" rule parked a perfectly good LED Button after three debugger reboots on the bench, and
 would have done the same to a module re-plugged quickly with no Conductor around to assign
-it. Costs 32 B (stage-1 now 2908 B).
+it. Costs 32 B (stage-1 was 2908 B in 3 KB at that point; now 2928 B in 4 KB after layout 2).
 
 **Bench (`bad_app.c` — valid CRC, starts the IWDG, hangs):** witness `FF BA BA BA FF` — ran
 on attempts 1, 2, 3, never a fourth; then `0x7E` answered `[3, 7]`.
@@ -461,9 +469,9 @@ bootloader does not implement `0xB1`, so silence means "old world" and a reply m
 `0x0400`, something at `0x0000` jumped to it.
 
 Two constants are kept deliberately distinct in stage-1, because conflating them is an
-easy way to corrupt the control block later: `APP_REGION_LEN` (12160 B) bounds what an
+easy way to corrupt the control block later: `APP_REGION_LEN` (11136 B) bounds what an
 *application* may occupy and stops short of the control block, while `APP_ERASE_LEN`
-(12 KB) is what `ERASE` actually clears, so a fresh image wipes the marker and metadata
+(11 KB) is what `ERASE` actually clears, so a fresh image wipes the marker and metadata
 too.
 
 ## 9. CH32V203 (USB modules)
