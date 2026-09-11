@@ -111,10 +111,10 @@ into the app region instead of permanently reserving scratch space.
 
 | Power lost during | State on next boot | Recovery |
 |---|---|---|
-| Staging transfer (2–3) | No marker; stage-1 intact | Boots stage-1 → flash mode → host retries |
-| Marker write (4) | Marker garbage → reads as "no update"; stage-1 untouched | Boots stage-1 → flash mode → host retries |
-| Erase / copy (5) | Marker still set; **staging never touched** | Stage-0 redoes the erase+copy — idempotent |
-| Marker clear (5) | Marker garbage → "no update"; stage-1 now valid | Boots the new stage-1 |
+| Staging transfer (2–3) | No marker; stage-1 intact | Boots stage-1 → flash mode → host retries. **Proven** (`test_stage_cut`) |
+| Marker write (4) | Marker garbage → reads as "no update"; stage-1 untouched | Boots stage-1 → flash mode → host retries. **Proven** for both a missing magic (`test_marker_nomagic`) and a landed magic with an insane descriptor (`test_marker_garbage` — rejected, marker deliberately left set) |
+| Erase / copy (5) | Marker still set; **staging never touched** | Stage-0 redoes the erase+copy — idempotent. **Proven** (`test_recover`) |
+| Marker clear (5) | Marker still set; stage-1 already complete | Stage-0 redoes the copy (idempotent), clears, boots the new stage-1. **Proven** (`test_clear_cut`) |
 
 There is **no window in which the module becomes unrecoverable without physical access**,
 which is DEV-31's core acceptance criterion. Staging is CRC-verified before the marker is
@@ -303,11 +303,24 @@ failures, zero hangs**. Combined with 10 Sep that is 2432 erases with exactly on
 in the very first four attempts ever, never repeated. Closed as an early bench transient;
 stage-0's verify-and-retry covers the class regardless.
 
+**All four power-loss windows proven (11 Sep 2026, SWD-simulated, `run_swd_tests.sh` — 8/8):**
+
+| Test | Simulates | Witness | Marker after |
+|---|---|---|---|
+| `stage_cut` | power cut mid-staging: half an image, no marker | A1 (old) | FF |
+| `marker_nomagic` | marker write cut before the magic landed | A1 | FF |
+| `marker_garbage` | marker write cut *after* the magic — descriptor all FF | A1 | **left set** (rejected as insane; documented) |
+| `recover` | cut mid-copy: stage-1 half-written | A2 (new) | FF |
+| `clear_cut` | cut during marker clear: copy complete, marker still set | A2 | FF |
+
+`marker_garbage` is the one that matters most: to a naive implementation it *looks* like a
+pending update. Stage-0's descriptor sanity check rejects it and boots the old stage-1; the
+marker stays set because stage-0 never clears one it did not act on (that would mean
+unlocking flash on a normal boot). Harmless — stage-1 rewrites the block on the next real
+update — and it means a corrupt marker can never drive an erase.
+
 **Still to do:**
 
-- Interruption at the other three windows in §5 (during staging, during the marker write,
-  during the marker clear). Only the mid-copy window is covered so far. These can be
-  simulated over SWD the same way `test_recover` was.
 - Conductor integration — `noknok.py` needs a `stage1_update()` alongside `update_module()`,
   using `bench_stage1.py`'s two new commands and the disappear-then-reappear wait.
 - The same exercise on the CH32V203 over USB.

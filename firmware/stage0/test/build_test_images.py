@@ -128,6 +128,67 @@ def main():
     place(img, CTRL_OFF,    ctrl,            'control block (marker STILL SET)')
     open(os.path.join(HERE, 'test_recover.bin'), 'wb').write(img)
 
+    # ---- The other three power-loss windows (spec §5) --------------------------
+    # test_recover covered "power cut during erase/copy". These cover the rest.
+    # In every one, stage-0 must NOT get stuck and must boot SOME stage-1 cleanly.
+    # The witness is pre-cleared to 0x00 in all of them so a stale value from an
+    # earlier test cannot masquerade as a pass.
+
+    # Window 1 — cut during the STAGING transfer: half an image at 0x1000, and no
+    # marker (stage-1 only writes the marker after a full CRC-verified transfer).
+    # Expect: stage-0 sees no marker, boots the installed A1 untouched.
+    print('\ntest_stage_cut.bin  (power cut mid-staging: partial image, no marker)')
+    img = blank()
+    place(img, 0,           stage0,          'stage-0')
+    place(img, STAGE1_BASE, a1,              'installed stage-1 A1')
+    place(img, APP_BASE,    a2[:len(a2)//2], 'HALF-staged A2 (no marker)')
+    place(img, WITNESS,     b'\x00' * 64,    'witness cleared')
+    open(os.path.join(HERE, 'test_stage_cut.bin'), 'wb').write(img)
+
+    # Window 2a — cut during the MARKER write, before the magic landed: the
+    # descriptor fields are valid but word 0 is still 0xFFFFFFFF.
+    # Expect: not a pending update -> boots A1.
+    print('\ntest_marker_nomagic.bin  (marker write cut before the magic)')
+    img = blank()
+    place(img, 0,           stage0,       'stage-0')
+    place(img, STAGE1_BASE, a1,           'installed stage-1 A1')
+    place(img, APP_BASE,    a2,           'fully staged A2')
+    place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
+    nomagic = struct.pack('<5I', 0xFFFFFFFF,
+                          FLASH_ALIAS + APP_BASE, len(a2),
+                          zlib.crc32(a2) & 0xffffffff, FLASH_ALIAS + APP_BASE)
+    place(img, CTRL_OFF, nomagic, 'control block: magic FF, rest valid')
+    open(os.path.join(HERE, 'test_marker_nomagic.bin'), 'wb').write(img)
+
+    # Window 2b — the nasty one: the magic landed but the descriptor did not.
+    # To a naive implementation this LOOKS like a pending update. Stage-0's
+    # sanity check must reject it (app_base 0xFFFFFFFF > FLASH_END, len
+    # 0xFFFFFFFF > region) and fall through to booting A1. The marker stays set
+    # (stage-0 never clears one it did not act on) — that is documented and
+    # harmless: stage-1 rewrites the block on the next real update.
+    print('\ntest_marker_garbage.bin  (marker write cut after the magic)')
+    img = blank()
+    place(img, 0,           stage0,       'stage-0')
+    place(img, STAGE1_BASE, a1,           'installed stage-1 A1')
+    place(img, APP_BASE,    a2,           'fully staged A2')
+    place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
+    garbage = struct.pack('<5I', CTRL_MAGIC, 0xFFFFFFFF, 0xFFFFFFFF,
+                          0xFFFFFFFF, 0xFFFFFFFF)
+    place(img, CTRL_OFF, garbage, 'control block: magic OK, descriptor FF')
+    open(os.path.join(HERE, 'test_marker_garbage.bin'), 'wb').write(img)
+
+    # Window 4 — cut during the MARKER CLEAR: the copy finished (stage-1 == A2)
+    # but the marker is still fully set. Expect: stage-0 redoes the copy (A2 ->
+    # A2, idempotent), clears the marker, boots A2.
+    print('\ntest_clear_cut.bin  (power cut during marker clear: copy done, marker still set)')
+    img = blank()
+    place(img, 0,           stage0,       'stage-0')
+    place(img, STAGE1_BASE, a2,           'stage-1 already == A2')
+    place(img, APP_BASE,    a2,           'staged A2 (intact)')
+    place(img, WITNESS,     b'\x00' * 64, 'witness cleared')
+    place(img, CTRL_OFF,    ctrl,         'control block (marker STILL SET)')
+    open(os.path.join(HERE, 'test_clear_cut.bin'), 'wb').write(img)
+
     # ---- test_chain: the REAL stage-1, not a stub ---------------------------
     # stage-0 -> real stage-1 -> application. Proves stage-0 hands off correctly
     # to the actual bootloader, that stage-1 runs from 0x0400, validates the app
@@ -162,6 +223,10 @@ def main():
     print('  test_jump    -> expect 0xA1  (stage-0 jumped to the installed stage-1)')
     print('  test_update  -> expect 0xA2  (stage-0 applied the pending update)')
     print('  test_recover -> expect 0xA2  (stage-0 redid an interrupted copy)')
+    print('  test_stage_cut      -> expect 0xA1  (no marker: staged junk ignored)')
+    print('  test_marker_nomagic -> expect 0xA1  (magic missing: not pending)')
+    print('  test_marker_garbage -> expect 0xA1  (magic OK, descriptor insane: rejected)')
+    print('  test_clear_cut      -> expect 0xA2  (marker still set: copy redone, harmless)')
     if s1 is not None:
         print('  test_chain   -> expect 0xA3  (stage-0 -> real stage-1 -> app)')
     print(f'\nstage-0 {len(stage0)} B / {STAGE1_BASE} B budget, '
