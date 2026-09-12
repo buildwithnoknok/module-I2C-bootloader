@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "component": "stage1",
+  "version": "1.2.0",
+  "url": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-bootloader/main/firmware/bin/noknok_stage1.bin",
+  "layout": 2,
+  "size": 2984,
+  "crc32": "5b0f52d3",
+  "released": "2026-09-12"
+}
