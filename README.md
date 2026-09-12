@@ -31,6 +31,8 @@ Version history: [`CHANGELOG.md`](CHANGELOG.md).
 | `firmware/src/` | The original monolithic 4 KB bootloader. | **Legacy** — what shipped modules run until re-flashed; retire once they are |
 | `firmware/stage0/test/` | Stage-0 bench harness + test-image builder. | — |
 | `firmware/test/fast_erase_probe/` | Probe proving CH32V003 64-byte erase granularity. | — |
+| `firmware/bin/noknok_stage1.bin` | The **released** stage-1 — what brains in the field download. | 1.2.0 |
+| `firmware/index.json` | **The field-distribution index for stage-1**: version, url, layout, size, crc32 — all required. Every brain reads it (via the Ecosystem registry, `bootloader.stage1`) on its daily check and brings any module below `version` up to it over the bus. **Update it in the same commit as the `.bin`, generated from the binary** — see [Ecosystem firmware-index.md](https://github.com/buildwithnoknok/Ecosystem/blob/main/software/firmware-index.md). This repo is public so raw URLs resolve. | New (12 Sep 2026) |
 | `docs/stage0-design.md` | Full stage-0 / stage-1 design spec. | — |
 
 ## Flash map (16 KB)
