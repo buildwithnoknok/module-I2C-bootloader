@@ -15,12 +15,14 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 >
 > **Stage-0 / stage-1 split (Sep 2026, DEV-31):** built and SWD-bench-validated — 4/4
 > tests, including recovery from a deliberately half-written stage-1. Stage-0 is 704 B
-> in a frozen 1 KB reservation; stage-1 is 2928 B in **4 KB** (layout 2 since 11 Sep 2026 — the app base moved from `0x1000` to `0x1400`). **Validated over I²C on
+> in a frozen 1 KB reservation; stage-1 is 2984 B (v1.2.0) in **4 KB** (layout 2 since 11 Sep 2026 — the app base moved from `0x1000` to `0x1400`). **Validated over I²C on
 > 11 Sep 2026** — a real stage-1 self-update v1.0.0 → v1.0.1 over the bus, confirmed from
 > both the I²C and SWD sides. `firmware/src/` (the monolithic bootloader) is still what every
 > existing module runs until they are re-flashed.
 
 ## Repo layout
+
+Version history: [`CHANGELOG.md`](CHANGELOG.md).
 
 | Path | What | Status |
 |------|------|--------|
@@ -36,7 +38,7 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 | Region | Address | Size | Written by | Notes |
 |--------|---------|------|-----------|-------|
 | **Stage-0** | `0x0000_0000` | 1 KB | SWD (once) | Runs first on every reset. **Frozen forever.** Measured 704 B. |
-| **Stage-1** | `0x0000_0400` | 4 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2928 B (v1.1.0). **Base must be 1 KB aligned** (mtvec). |
+| **Stage-1** | `0x0000_0400` | 4 KB | stage-0, from staging | The real bootloader. Field-updatable. Measured 2984 B (v1.2.0). **Base must be 1 KB aligned** (mtvec). |
 | Application | `0x0000_1400` | ~10.9 KB | I²C OTA | The module's real firmware, linked at the `0x1400` offset (layout 2). |
 | **Control block** | `0x0000_3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Update marker + staging descriptor + `app_base`. |
 | Metadata | `0x0000_3FC0` | 64 B | I²C OTA | Validity marker: `{magic, app_length, app_crc32}`. |
@@ -85,7 +87,7 @@ in stage-0's halt state.
 | `0x04` VERIFY | write | `[len(4 LE), crc32(4 LE)]` | CRC-check, then write the validity marker. |
 | `0x05` BOOT | write | — | Boot the app — or, if a stage-1 update is pending, reset so stage-0 installs it. |
 | `0x06` VERIFY_STAGE1 | write | `[len(4 LE), crc32(4 LE)]` | **stage-1 only.** CRC-check the staged stage-1; on match, arm stage-0. |
-| `0xB1` GET_VERSION | write, then read | → `[proto, major, minor, patch]` | **stage-1 only.** Bootloader version. |
+| `0xB1` GET_VERSION | write, then read | → `[proto, major, minor, patch, layout]` | **stage-1 only.** Bootloader version **+ flash layout id** (5th byte, since v1.2.0 — apps answer 4 bytes; a pre-1.2.0 stage-1 clocks out `0x00` there). |
 | `0xB3` GET_UID | write, then read | → 8-byte chip UID | **stage-1 only.** Same bytes/order as the enumeration reply — lets the Conductor identify a module parked here. |
 
 **A stage-1 update is the same transfer as an application update** — same `ERASE`, same
@@ -103,12 +105,16 @@ the app straight afterwards.
 
 `0xB1` matches the application's `GET_VERSION` so the Conductor can ask anything on the
 bus for its version — no ambiguity, since the bootloader answers at `0x7E` and apps at
-their runtime address. The legacy monolithic bootloader doesn't implement it, so
+their runtime address. **Since stage-1 v1.2.0 the bootloader's reply is 5 bytes**, the 5th
+being the flash layout id straight from the image header (`2` = stage-1 4 KB, app `0x1400`),
+so the host reads the layout from the module instead of inferring it from the version.
+Apps still answer 4 bytes. Reading 5 from a pre-1.2.0 stage-1 yields `0x00` as byte 5 = "did
+not say". The legacy monolithic bootloader doesn't implement it, so
 **silence means "old world" and a reply means "stage-0/stage-1 module"**.
 
 **Error codes** (`READ_STATUS` byte 1): 1 bad chunk len · 2 bad verify len · 3 offset out of range · 4 verify len invalid · 5 CRC mismatch · 6 BOOT with no valid app · **7 app unhealthy** (stage-1 refused to boot an app that crashed three times; cleared by the next command) · **8 not a stage-1 image** (`VERIFY_STAGE1` header check failed).
 
-**The app is watched.** Stage-1 counts every boot of the application; the app clears the counter once its I2C address is assigned, and every noknok app runs the independent watchdog so a hang becomes a warm reset. A valid-CRC app that crashes three times in a row (three consecutive **watchdog** resets — any other reset cause starts a fresh series) is parked here with error 7 instead of being booted forever, and the Conductor's `rescue_parked_module()` puts it right by UID (`0xB3`). Contract for app authors: `Ecosystem/software/bootloader-update.md` §3.
+**The app is watched.** Stage-1 counts every boot of the application; the app clears the counter once its I2C address is assigned, and every noknok app runs the independent watchdog so a hang becomes a warm reset. **Since v1.2.0 stage-1 arms the IWDG itself (~2 s) before jumping**, so an app that dies *before* its own `iwdg_init()` — a wrongly-linked image, an early fault — is watchdog-reset and counted too, instead of hanging silently (the 12 Sep 2026 layout-mismatch incident). The IWDG cannot be stopped: every app must kick it, and its first kick must come within ~2 s of the jump (ours: < 300 ms). A valid-CRC app that crashes three times in a row (three consecutive **watchdog** resets — any other reset cause starts a fresh series) is parked here with error 7 instead of being booted forever, and the Conductor's `rescue_parked_module()` puts it right by UID (`0xB3`). Contract for app authors: `Ecosystem/software/bootloader-update.md` §3.
 
 A running app enters the bootloader when the Pico sends it command `0xB0`
 (ENTER_BOOTLOADER): the app writes magic `0x6E6B4231` to `0x200007F0` and resets.
@@ -124,7 +130,7 @@ this project.
 
 ```sh
 cd firmware/stage0 && make build   # → noknok_stage0.bin  (704 B / 1 KB)
-cd firmware/stage1 && make build   # → noknok_stage1.bin  (2928 B / 4 KB)
+cd firmware/stage1 && make build   # → noknok_stage1.bin  (2984 B / 4 KB)
 ```
 
 Layouts are set by `stage0/stage0.ld` (`ORIGIN 0x0000`, 1 KB) and
@@ -141,13 +147,14 @@ Stage-1 *does* use `ch32fun.mk`; it needs the vector table for the I²C handlers
 ## Regression — run before any stage-1 release
 
 ```sh
-sh firmware/stage0/test/regress_all.sh      # on the bench Pi, ~4 min, PASS/FAIL table
+sh firmware/stage0/test/regress_all.sh      # on the bench Pi, ~4.5 min, PASS/FAIL table
 ```
 
 One command covers the whole chain: the ten stage-0 SWD images (every power-loss window
 and every corrupt-descriptor attack), the stage-1 self-update over I²C cross-checked over
 SWD, the Conductor's `stage1_update()` with app restore, the wrong-file refusal, the
-hanging-app park, and the parked-module rescue. Each step, what it proves and what a FAIL
+hanging-app park, the silent-app park (an app that never arms a watchdog — stage-1 v1.2.0
+arms it first), and the parked-module rescue. Each step, what it proves and what a FAIL
 means: [`firmware/stage0/test/TESTS.md`](firmware/stage0/test/TESTS.md). Mandatory before a
 stage-1 release (there is no rollback), a stage-0 change, an app change to the boot/watchdog
 block, a Conductor flashing/state change, or a production batch.

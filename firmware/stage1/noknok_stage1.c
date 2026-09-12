@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Copyright (c) noknok
  *
- * noknok Stage-1  v1.0.0   CH32V003   |  Stack: cnlohr/ch32fun
+ * noknok Stage-1  v1.2.0   CH32V003   |  Stack: cnlohr/ch32fun
  * ============================================================================
  * The real bootloader: re-flashes a module's APPLICATION over I2C, exactly as
  * the monolithic bootloader always did. What is new (DEV-31) is that stage-1 is
@@ -32,9 +32,16 @@
  *     [0x04, len(4 LE), crc32(4 LE)]      VERIFY app: CRC32 then write marker
  *     [0x06, len(4 LE), crc32(4 LE)]      VERIFY_STAGE1: CRC32 then arm update
  *     [0x05]                              BOOT (app, or reset to apply stage-1)
- *     [0xB1]                              GET_VERSION -> next read gives 4 bytes
+ *     [0xB1]                              GET_VERSION -> next read gives 5 bytes
  *     [0xB3]                              GET_UID -> next read gives the 8-byte chip UID
- *   Master READ:  [state, last_error], or 4 version bytes after 0xB1.
+ *   Master READ:  [state, last_error], 5 version bytes after 0xB1, 8 UID bytes after 0xB3.
+ *
+ * ── Watchdog contract (v1.2.0) ──────────────────────────────────────────────
+ * jump_to_app() ARMS THE IWDG (~2 s) before handing over. An application that
+ * never reaches its own iwdg_init() — wrong link address, early fault, anything
+ * — is watchdog-reset, hardening C counts it, and after three strikes the
+ * module parks here with error 7 instead of hanging silently. The IWDG cannot
+ * be stopped, so every application MUST kick it (all layout-2 apps do).
  *
  * ── How a stage-1 update works ──────────────────────────────────────────────
  * The transfer is IDENTICAL to an application update — same ERASE, same
@@ -73,7 +80,7 @@
 #define S1_VERSION_MAJOR    1
 #endif
 #ifndef S1_VERSION_MINOR
-#define S1_VERSION_MINOR    1   /* 1.1.0: layout 2, app at 0x1400 */
+#define S1_VERSION_MINOR    2   /* 1.2.0: IWDG armed before the app; 0xB1 reports layout. 1.1.0: layout 2, app at 0x1400 */
 #endif
 #ifndef S1_VERSION_PATCH
 #define S1_VERSION_PATCH    0
@@ -223,7 +230,7 @@ static volatile uint8_t  rx_len = 0;
 
 static volatile uint8_t  tx_buf[8];
 static volatile uint8_t  tx_idx = 0;
-static volatile uint8_t  tx_len = 2;   /* 2 = [state,err]; 4 after GET_VERSION; 8 after GET_UID */
+static volatile uint8_t  tx_len = 2;   /* 2 = [state,err]; 5 after GET_VERSION; 8 after GET_UID */
 static volatile uint8_t  version_pending = 0;
 static volatile uint8_t  uid_pending     = 0; /* set in ISR on 0xB3; next read returns the UID */
 
@@ -361,6 +368,29 @@ static void jump_to_app(void)
     /* Count this attempt. The app clears the cell once it is healthy. */
     APP_ATTEMPT_CELL = APP_ATTEMPT_TAG | (app_attempts() + 1U);
 
+    /* Arm the independent watchdog BEFORE handing over (v1.2.0).
+     * Hardening C only works if a broken app produces a WATCHDOG reset — and
+     * an app that faults before its own iwdg_init() (wrong link address, early
+     * crash) never starts one, so it hung silently and needed SWD (12 Sep 2026,
+     * a layout-2 image on a layout-1 buzzer). Now the watchdog is already
+     * running when the app starts; if the app never kicks it, the chip resets
+     * with IWDGRSTF, stage-1 counts the strike, and after three it parks.
+     *
+     * Same setting the apps use: LSI ~128 kHz / 64, reload 4095 = ~2.05 s.
+     * The app must reach its first kick within that; ours do in < 300 ms
+     * (iwdg_init() is the first call after SystemInit, then a short startup
+     * cue, then the main loop). PSCR/RLDR stay writable after start, so the
+     * app's own iwdg_init() simply re-configures the running watchdog. We wait
+     * for the PVU/RVU update flags to clear so that re-configuration is never
+     * ignored (a write while an update is pending is dropped); bounded, so a
+     * dead LSI can never keep us from booting the app. Cannot be
+     * stopped except by reset: an app without a kick is parked after ~6 s —
+     * that is the "watchdog mandatory" rule, enforced. */
+    IWDG->CTLR = 0x5555;  IWDG->PSCR = 4;       /* /64                        */
+    IWDG->CTLR = 0x5555;  IWDG->RLDR = 0xFFF;   /* 4095 -> ~2.05 s nominal    */
+    IWDG->CTLR = 0xCCCC;                        /* start (LSI starts itself)  */
+    for (uint32_t i = 0; i < 20000U && (IWDG->STATR & (IWDG_PVU | IWDG_RVU)); i++);
+
     __disable_irq();
     RCC->APB1PRSTR |=  RCC_APB1Periph_I2C1;
     RCC->APB1PRSTR &= ~RCC_APB1Periph_I2C1;
@@ -428,7 +458,13 @@ void I2C1_EV_IRQHandler(void)
                 tx_buf[1] = S1_VERSION_MAJOR;
                 tx_buf[2] = S1_VERSION_MINOR;
                 tx_buf[3] = S1_VERSION_PATCH;
-                tx_len    = 4;
+                /* 5th byte (v1.2.0): the flash layout this stage-1 runs, straight
+                 * from the image header — so the host never has to infer the
+                 * layout from the version number. Apps still answer 4 bytes;
+                 * only the bootloader's 0xB1 is 5. A pre-1.2.0 stage-1 clocks
+                 * out 0x00 here (TXE pads past tx_len), so 0 = "did not say". */
+                tx_buf[4] = (uint8_t)stage1_hdr.layout;
+                tx_len    = 5;
             } else if (uid_pending) {
                 /* Same 8 bytes, same order, as the app's enumeration reply —
                  * so the host can match a module parked here to the type it

@@ -5,7 +5,7 @@ Copyright (c) noknok
 
 # Stage-0 / Stage-1 Bootloader Split — Design Spec
 
-**Status:** implemented and validated over I²C (11 Sep 2026); frozen stage-0 1 KB / stage-1 at `0x0400`; **layout 2** (stage-1 4 KB, app `0x1400`) since 11 Sep 2026 · **Jira:** DEV-31 · **Target:** CH32V003 (CH32V203 variant at the end)
+**Status:** implemented and validated over I²C (11 Sep 2026); frozen stage-0 1 KB / stage-1 at `0x0400`; **layout 2** (stage-1 4 KB, app `0x1400`) since 11 Sep 2026; **stage-1 v1.2.0** (12 Sep 2026: IWDG armed before the app, `0xB1` reports layout — §8, "Watchdog contract") · **Jira:** DEV-31 · **Target:** CH32V003 (CH32V203 variant at the end)
 
 This is the design for making the noknok module **bootloader itself** field-updatable.
 Everything else on a module already is: the payload firmware updates over I2C/USB, and
@@ -378,8 +378,9 @@ end to end**. USB raises `NotImplementedError` until the CH32V203 port.
 
 Source: `firmware/stage1/`. Relinked from `0x0000` to `0x0400`, derived from the
 hardware-validated monolithic bootloader; **the application-flashing path is unchanged**.
-Builds to **2928 B in the 4 KB region** (1168 B free; layout 2), 96 B RAM, after hardening C/D/E
-below (it was 2600 B before).
+Builds to **2984 B in the 4 KB region** (1112 B free; layout 2), 104 B RAM, as v1.2.0 — after
+hardening C/D/E below (2600 B before those) and the v1.2.0 watchdog contract + layout byte
+(+56 B over 1.1.0).
 
 The design principle for the new commands: **a stage-1 update is the same transfer as an
 application update.** Same `ERASE`, same `WRITE_CHUNK`, same staging area. Only the
@@ -393,7 +394,7 @@ stage-1 update:  ERASE -> WRITE_CHUNK xN -> VERIFY_STAGE1(0x06) -> BOOT
 | Command | Payload | Action |
 |---|---|---|
 | `0x06 VERIFY_STAGE1` | `[len(4 LE), crc32(4 LE)]` | CRC the staged image **and check its header** (hardening E); **only on both** write the control block (with its descriptor CRC, hardening A) that arms stage-0 |
-| `0xB1 GET_VERSION` | — | next read returns `[BL_PROTOCOL_VERSION, major, minor, patch]` |
+| `0xB1 GET_VERSION` | — | next read returns `[BL_PROTOCOL_VERSION, major, minor, patch, layout]` — **5 bytes since v1.2.0**; byte 5 is the flash layout id from the image header (apps keep answering 4 bytes; a pre-1.2.0 stage-1 clocks out `0x00` there) |
 | `0xB3 GET_UID` | — | **hardening D:** next read returns the 8-byte chip UID, same bytes/order as the app's enumeration reply |
 | `0x05 BOOT` | — | **changed:** a pending stage-1 update now outranks booting the app — reset so stage-0 installs it |
 
@@ -431,6 +432,63 @@ it. Costs 32 B (stage-1 was 2908 B in 3 KB at that point; now 2928 B in 4 KB aft
 **Bench (`bad_app.c` — valid CRC, starts the IWDG, hangs):** witness `FF BA BA BA FF` — ran
 on attempts 1, 2, 3, never a fourth; then `0x7E` answered `[3, 7]`.
 
+### Watchdog contract — stage-1 arms the IWDG before the jump (v1.2.0, 12 Sep 2026)
+
+Hardening C had a hole: it only counts **watchdog** resets, and the watchdog was started by
+the *app*. An application that faults before it reaches its own `iwdg_init()` produces no
+reset at all — it just hangs, silently, forever. That is exactly what the first real OTA run
+did on 12 Sep 2026: a layout-2 buzzer image (linked at `0x1400`) was pushed onto a layout-1
+buzzer, stage-1 wrote it at `0x1000`, the CRC passed (it is over the image bytes, not the
+link address), the module jumped into wrongly-linked code and hung. Not parked. SWD clamp.
+
+Now `jump_to_app()` arms the independent watchdog itself, immediately before handing over:
+`PSCR = 4` (LSI ÷ 64), `RLDR = 0xFFF` → **~2.05 s nominal** (LSI is loosely specified, so
+call it 1.3–3 s), then waits (bounded) for the PVU/RVU update flags to clear so the app's own
+re-configuration is never dropped. The app inherits a *running* watchdog: its `iwdg_init()`
+simply re-writes the same prescaler/reload (PSCR/RLDR stay writable after start) and its
+first `iwdg_kick()` reloads it. If the app never gets that far, the chip resets with
+`IWDGRSTF`, hardening C counts the strike, and after three the module parks at `0x7E` with
+error 7 — where `rescue_parked_module()` finds it by UID and pushes the right image.
+Today's clamp job becomes a reboot.
+
+Why 2 s: the same value every layout-2 app already uses, so nothing about the apps' timing
+changes; long enough for any legitimate boot (our apps reach their first kick in < 300 ms —
+`iwdg_init()` is the first call after `SystemInit()`, then a startup cue of ≤ 200 ms, then
+the main loop), short enough that a hung module is parked in ~6 s rather than minutes.
+Longer would only delay the park; shorter starts eating into the startup cue.
+
+Consequences, stated deliberately:
+
+- **"Watchdog mandatory" is now enforced, not just required.** The IWDG cannot be stopped
+  except by reset, so an application that never kicks it is parked after three strikes.
+  Acceptable for layout 2 because every app was rebuilt with the watchdog block (LED Button
+  2.4.0, Buzzer 3.5.0, Knob 2.3.0, Display 0.5.0). Recorded in the Ecosystem runbook §3.
+- **The app must reach its first kick within the timeout.** A new app with a long blocking
+  startup (a display animation, a self-test) must kick inside it — as the Display already
+  does inside its backlight ramp.
+- The watchdog is armed only on the jump-to-app path. Stage-1's own flash mode never arms
+  it (flash mode does not kick), and a `0xB0` reset from the app stops it like any reset.
+- Cost: the two v1.2.0 changes together are +56 B in stage-1 (2928 → 2984 B). Not a stage-0 change.
+
+**Bench:** step 6 of `regress_all.sh` (`silent_app.c` — valid CRC, never touches the IWDG,
+hangs): expected witness `FF 5A 5A 5A FF` and `0x7E` → `[3, 7]`. On a pre-1.2.0 stage-1 the
+same image hangs with `0x7E` silent — the FAIL signature is the old behaviour.
+
+### `0xB1` reports the layout (v1.2.0)
+
+The bootloader's `GET_VERSION` reply grew from 4 to **5 bytes**:
+`[proto, major, minor, patch, layout]`. Byte 5 is `stage1_hdr.layout` — the same word
+`VERIFY_STAGE1` checks in a staged image — so the host reads *which flash map this module
+runs* directly from the module, instead of keeping a "stage-1 1.0.x = layout 1, 1.1.x =
+layout 2" table (the Conductor's `STAGE1_LAYOUTS`, now retirable). That table was the other
+half of the 12 Sep incident: the host had to *infer* the layout, and inferred wrong.
+
+Applications keep the 4-byte reply — only the bootloader's `0xB1` is 5 bytes, and there is
+no ambiguity because the bootloader answers at `0x7E` and apps at their runtime address.
+A host that reads 5 bytes from a pre-1.2.0 stage-1 receives `0x00` as byte 5 (the ISR pads
+past `tx_len`), so `layout == 0` means "stage-1 too old to say", never a real layout.
+`BL_PROTOCOL_VERSION` stays 1: the command set did not change, the reply is additive.
+
 ### Hardening D — `GET_UID`, and the Conductor's rescue path
 
 A parked module does not enumerate, so nothing in the Conductor would ever see it — and
@@ -461,7 +519,8 @@ offset `0xF8` while the check reads `0x100`. Now an explicit `AT()` and a `LOADA
 `ASSERT`; the vector table is also asserted to stay under `0x100`.
 
 **`0xB1` was chosen deliberately** to match the application's `GET_VERSION` (DEV-1) — same
-command, same 4-byte shape, so the Conductor can ask anything on the bus for its version.
+command, same shape (4 bytes; the bootloader appends a 5th since v1.2.0, see below), so the
+Conductor can ask anything on the bus for its version.
 There is no ambiguity because the bootloader answers at `0x7E` and apps answer at their
 runtime address. It also gives the fleet discriminator for free: **the old monolithic
 bootloader does not implement `0xB1`, so silence means "old world" and a reply means

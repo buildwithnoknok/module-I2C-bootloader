@@ -12,7 +12,7 @@ explains them; it never replaces them.
 | any stage-1 release (`firmware/bin/noknok_stage1.bin`) | stage-1 is field-updatable but has **no rollback** — the regression is the gate |
 | any change to stage-0 | should never happen after the first batch; if it does, all 10 SWD images must still pass |
 | an app change touching boot, enumeration, `SystemInit()`, the watchdog or the linker script | the app is a party to the boot contract (health clear, reserved RAM) |
-| a Conductor change touching `module_flasher.py`, `_save_state()`, `stage1_update()`, `rescue_parked_module()` | steps 3, 4 and 6 are the Conductor's proof |
+| a Conductor change touching `module_flasher.py`, `_save_state()`, `stage1_update()`, `rescue_parked_module()` | steps 3, 4 and 7 are the Conductor's proof |
 | programming a production batch (DEV-29) | last look before the frozen stage-0 goes into 100+ boards |
 
 Everything else (an app's feature code, Pico product scripts) does not need it.
@@ -20,11 +20,11 @@ Everything else (an app's feature code, Pico product scripts) does not need it.
 **Bench needed:** the reference bench from Confluence *"Firmware Bench — How to Build and Drive
 One"* — WCH-LinkE on the LED Button's SWD pads (target power OFF, GND + SWIO), Pico on the Pi
 with the LED Button on its I2C bus, a pull-up source on the bus (a legacy buzzer works and
-doubles as the "other module" for step 6), the bench files listed at the top of `regress_all.sh`
+doubles as the "other module" for step 7), the bench files listed at the top of `regress_all.sh`
 on the Pico. Read protection on the LED Button must be off.
 
 The runner **builds stage-0, stage-1 and the LED Button app from source** first (three stage-1
-versions PATCH 0 / 1 / 2 of whatever `S1_VERSION_*` says, e.g. 1.1.0 / 1.1.1 / 1.1.2; the
+versions PATCH 0 / 1 / 2 of whatever `S1_VERSION_*` says, e.g. 1.2.0 / 1.2.1 / 1.2.2; the
 full restore image is assembled by `mk_full.py`), so it tests what is checked out, not
 whatever binaries were lying around. Layout constants (app base `0x1400`) live in
 `mk_full.py`, `build_test_images.py`, `fake_app.ld`, `fake_stage1.ld` — keep them in step
@@ -109,12 +109,25 @@ confirms the module is parked again.
 
 Proves: a valid-but-broken app is parked after three watchdog resets instead of being dead
 until SWD — the biggest field win of the hardening round. **Leaves the module parked on
-purpose** — step 6 needs it. A FAIL with a witness of `FF BA BA BA BA` means the counter is
+purpose** — step 7 needs it (step 6 overwrites it with its own image first). A FAIL with a witness of `FF BA BA BA BA` means the counter is
 not being read/incremented across resets (no-init RAM cell `0x200007F8`).
 
-## Step 6 — `merge` · hardening D (`bench_state_merge.py`)
+## Step 6 — `silentapp` · stage-1 v1.2.0 watchdog contract (`run_badapp_test.sh silentapp`)
 
-With the LED Button parked from step 5: `enumerate()` (only the buzzer answers) → check
+Same harness as step 5 with `silent_app.c`: valid metadata and CRC, records a witness byte
+(`0x5A`), then hangs **without ever touching the IWDG**. Expected: exactly as step 5 —
+`0x7E` answering `[3, 7]` and the witness `FF 5A 5A 5A FF`.
+
+Proves: stage-1 arms the independent watchdog (~2 s) *before* jumping to the application, so
+an app that dies before its own `iwdg_init()` — a wrongly-linked image, an early fault — is
+still reset, counted and parked instead of hanging silently. This is the direct test of the
+12 Sep 2026 incident (layout-2 image on a layout-1 module: hung, needed SWD). **On a stage-1
+older than 1.2.0 this step FAILS with `0x7E silent`** — that is the module hung, exactly the
+old behaviour. **Leaves the module parked on purpose** — step 7 needs it.
+
+## Step 7 — `merge` · hardening D (`bench_state_merge.py`)
+
+With the LED Button parked from step 6: `enumerate()` (only the buzzer answers) → check
 `noknok_state.json` still holds the LED Button's UID → type entry → `rescue_parked_module()`
 (probes `0x7E`, reads the UID with `0xB3`, looks the type up, reflashes the app, boots) →
 `enumerate()` finds the LED Button again.
@@ -124,7 +137,7 @@ found on 11 Sep 2026: `_save_state()` replaced the file), and the UID-based resc
 end to end. A FAIL at "forgotten" is `_save_state()`; a FAIL at "did not reflash" is
 `rescue_parked_module()` or `GET_UID` in stage-1.
 
-**Board state after a full pass:** stage-0 + the base stage-1 build (the `badapp` image embeds it) + LED Button app, enumerated. Run `regress_all.sh` again any time — every step sets up its own start state.
+**Board state after a full pass:** stage-0 + the base stage-1 build (the `badapp`/`silentapp` images embed it) + LED Button app, enumerated. Run `regress_all.sh` again any time — every step sets up its own start state.
 
 ---
 

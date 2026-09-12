@@ -20,12 +20,14 @@
 # The stage-1 payloads are built and pushed by this script.
 #
 # ORDER MATTERS — each step leaves the board in a state the next one relies on:
-#   1 swd       ends: board restored (full image, stage-1 v1.1.1, app)   [~60 s]
-#   2 i2c       flashes its own start image (v1.1.0); ends restored       [~30 s]
-#   3 conductor needs a running app + a DIFFERENT stage-1 (pushes v1.1.2) [~15 s]
+#   1 swd       ends: board restored (full image, stage-1 vX.Y.1, app)   [~60 s]
+#   2 i2c       flashes its own start image (vX.Y.0); ends restored       [~30 s]
+#   3 conductor needs a running app + a DIFFERENT stage-1 (pushes vX.Y.2) [~15 s]
 #   4 wrongfile needs a running app; ends restored                        [~15 s]
-#   5 badapp    flashes a hanging app; ends PARKED at 0x7E (error 7)      [~25 s]
-#   6 merge     needs a parked module + its UID in noknok_state.json
+#   5 badapp    flashes a hanging app (own IWDG); ends PARKED at 0x7E (err 7) [~25 s]
+#   6 silentapp flashes an app that never arms ANY watchdog (v1.2.0: stage-1
+#               arms it before the jump); ends PARKED at 0x7E (error 7)   [~25 s]
+#   7 merge     needs a parked module + its UID in noknok_state.json
 #               (learned by 3/4); rescues it; ends running                [~15 s]
 # Exit 0 = all pass, 1 = a step failed (logs in /tmp/*.log), 2 = preflight/build.
 
@@ -59,8 +61,9 @@ done
 echo "LinkE, Pico (+ bench files), chip: ok"
 
 # -- build everything from SOURCE so we test what is committed, not leftovers --
-# Three stage-1 versions: v1.1.0 = start state for the I2C test, v1.1.1 = its
-# payload and the version in the "full" restore image, v1.1.2 = the Conductor
+# Three stage-1 versions (X.Y = the committed major.minor): vX.Y.0 = start state
+# for the I2C test, vX.Y.1 = its payload and the version in the "full" restore
+# image, vX.Y.2 = the Conductor
 # test's payload (it must differ from what is installed, or nothing is proven).
 echo "=== build ==="
 build_s1() {  # build_s1 <patch> <out.bin>   (run inside $S1)
@@ -73,7 +76,7 @@ build_s1() {  # build_s1 <patch> <out.bin>   (run inside $S1)
   || { tail -5 /tmp/build_s0.log; echo "FAIL: stage-0 build"; exit 2; }
 ( cd $S1 && build_s1 0 s1_0400_v100.bin && build_s1 1 s1_0400_v101.bin && build_s1 2 s1_0400_v102.bin \
     && cp s1_0400_v100.bin noknok_stage1.bin \
-    && ls -l s1_0400_v100.bin | awk '{print "stage-1:", $5, "B (built as v1.1.0 / v1.1.1 / v1.1.2)"}' \
+    && ls -l s1_0400_v100.bin | awk '{print "stage-1:", $5, "B (built as patch 0 / 1 / 2 of the committed major.minor)"}' \
     ) || { echo "FAIL: stage-1 build"; exit 2; }
 ( cd $APP && make clean >/dev/null 2>&1 && make build >/tmp/build_app.log 2>&1 \
     && ls -l keyboard_firmware.bin | awk '{print "LED Button app:", $5, "B"}' ) \
@@ -85,7 +88,7 @@ cp $S1/s1_0400_v101.bin $P/noknok_stage1_v101.bin
 cp $S1/s1_0400_v102.bin $P/noknok_stage1_new.bin
 ( cd $P && ./pico.py put noknok_stage1_v101.bin >/dev/null && ./pico.py put noknok_stage1_new.bin >/dev/null ) \
   || { echo "FAIL: could not push payloads to the Pico"; exit 2; }
-echo "payloads on the Pico: v1.1.1 (i2c step), v1.1.2 (conductor step)"
+echo "payloads on the Pico: patch 1 (i2c step), patch 2 (conductor step)"
 
 # -- 1. stage-0 SWD suite (10 images: jump, update, all power-loss windows, attacks) --
 run swd "cd $T && python3 build_test_images.py >/dev/null 2>&1 \
@@ -112,14 +115,21 @@ run badapp "cd $T && sh run_badapp_test.sh 2>&1 | tee /tmp/bad.log \
   | grep -E '^080|status|UNHEALTHY|unexpected' \
   && grep -q 'ff ba ba ba ff' /tmp/bad.log && grep -q 'APP UNHEALTHY' /tmp/bad.log"
 
-# -- 6. hardening D: state survives a parked module; rescue by UID -------------
+# -- 6. stage-1 v1.2.0 watchdog contract: an app that NEVER arms a watchdog is
+#       still parked, because stage-1 armed the IWDG before jumping to it. On a
+#       pre-1.2.0 stage-1 this step FAILS (0x7E silent = module hung) ---------
+run silentapp "cd $T && sh run_badapp_test.sh silentapp 2>&1 | tee /tmp/silent.log \
+  | grep -E '^080|status|UNHEALTHY|unexpected' \
+  && grep -q 'ff 5a 5a 5a ff' /tmp/silent.log && grep -q 'APP UNHEALTHY' /tmp/silent.log"
+
+# -- 7. hardening D: state survives a parked module; rescue by UID -------------
 run merge "cd $P && ./pico.py run bench_state_merge.py 2>&1 | tee /tmp/merge.log \
   | grep -v '$QC' | grep -E 'SURVIVED|reflashed|LED Buttons now|ALL PASS|FAIL' \
   && grep -q 'ALL PASS' /tmp/merge.log"
 
 # -- summary -------------------------------------------------------------------
 echo; echo "=================== REGRESSION SUMMARY ==================="
-for n in swd i2c conductor wrongfile badapp merge; do
+for n in swd i2c conductor wrongfile badapp silentapp merge; do
   case " $pass " in *" $n "*) printf '  %-10s PASS\n' $n;; *) printf '  %-10s FAIL\n' $n;; esac
 done
 echo "=========================================================="

@@ -252,6 +252,22 @@ def main():
         place(img, META_OFF, meta, 'app metadata (VALID)')
         open(os.path.join(HERE, 'test_badapp.bin'), 'wb').write(img)
 
+    # ---- test_silentapp: stage-1 v1.2.0 watchdog contract — an app with a
+    # VALID CRC that never starts a watchdog at all (silent_app.c: stamps 0x5A,
+    # spins). Before v1.2.0 this hung forever (no IWDG -> no reset -> nothing to
+    # count). Now stage-1 arms the IWDG before the jump, so the same three-
+    # strikes path must park it: witness FF 5A 5A 5A FF, 0x7E -> [3, 7].
+    if s1 is not None:
+        silent = build_fake(0x5A, 'silent_app.bin', ld='fake_app.ld', src='silent_app.c')
+        print('\ntest_silentapp.bin  (real stage-1 + an app that never arms a watchdog)')
+        img = blank()
+        place(img, 0,           stage0, 'stage-0')
+        place(img, STAGE1_BASE, s1,     'REAL stage-1')
+        place(img, APP_BASE,    silent, 'silent app (no IWDG, hangs)')
+        meta = struct.pack('<3I', 0xB007C0DE, len(silent), zlib.crc32(silent) & 0xffffffff)
+        place(img, META_OFF, meta, 'app metadata (VALID)')
+        open(os.path.join(HERE, 'test_silentapp.bin'), 'wb').write(img)
+
     # ---- test_chain: the REAL stage-1, not a stub ---------------------------
     # stage-0 -> real stage-1 -> application. Proves stage-0 hands off correctly
     # to the actual bootloader, that stage-1 runs from 0x0400, validates the app
