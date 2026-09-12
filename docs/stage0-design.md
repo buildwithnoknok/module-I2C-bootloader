@@ -41,7 +41,7 @@ works for USB (where a receiver would mean carrying a whole USB stack in the fro
 | Region | Address | Size | Written by | Mutable in field |
 |---|---|---|---|---|
 | **Stage-0** | `0x0000` | 1 KB (704 B used) | SWD, once at manufacture | **Never** |
-| **Stage-1** | `0x0400` | **4 KB** (2928 B used, v1.1.0) | stage-0, from staging | Yes |
+| **Stage-1** | `0x0400` | **4 KB** (2984 B used, v1.2.0) | stage-0, from staging | Yes |
 | **Application** | `0x1400` | 11 KB − 128 B (11136 B) | stage-1, over the bus | Yes |
 | **BL control block** | `0x3F80` | 64 B | stage-1 (set) / stage-0 (clear) | Yes |
 | **App metadata** | `0x3FC0` | 64 B | stage-1 | Yes |
