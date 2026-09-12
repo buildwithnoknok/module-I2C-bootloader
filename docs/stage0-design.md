@@ -480,7 +480,8 @@ The bootloader's `GET_VERSION` reply grew from 4 to **5 bytes**:
 `[proto, major, minor, patch, layout]`. Byte 5 is `stage1_hdr.layout` — the same word
 `VERIFY_STAGE1` checks in a staged image — so the host reads *which flash map this module
 runs* directly from the module, instead of keeping a "stage-1 1.0.x = layout 1, 1.1.x =
-layout 2" table (the Conductor's `STAGE1_LAYOUTS`, now retirable). That table was the other
+layout 2" table (the Conductor's `STAGE1_LAYOUTS` — retired the same day, `brain-Pico`
+`6213736`; `Conductor.layout_of()` now just returns byte 5). That table was the other
 half of the 12 Sep incident: the host had to *infer* the layout, and inferred wrong.
 
 Applications keep the 4-byte reply — only the bootloader's `0xB1` is 5 bytes, and there is
