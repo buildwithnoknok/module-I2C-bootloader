@@ -18,10 +18,12 @@
  * handoff cell, enable interrupts, set up the PLL, or touch PD1. All of that is
  * stage-1's job. That separation is what keeps this file small.
  *
- * ── Flash map (16 KB) ───────────────────────────────────────────────────────
+ * ── Flash map (16 KB), layout 2 (current since 11 Sep 2026) ─────────────────
  *   0x0000_0000  STAGE-0       1 KB     this code — FROZEN FOREVER (704 B used)
- *   0x0000_0400  STAGE-1       3 KB     the real bootloader — updatable
- *   0x0000_1000  APPLICATION   ~11.9 KB the module firmware — updatable
+ *   0x0000_0400  STAGE-1       4 KB     the real bootloader — updatable
+ *   0x0000_1400  APPLICATION   ~10.9 KB the module firmware — updatable
+ *   (Layout 1, the original map, had a 3 KB stage-1 and the app at 0x1000.
+ *    This file did not change for layout 2: the app base is DATA, see below.)
  *   0x0000_3F80  CONTROL BLOCK 64 B     stage-1 update marker (below)
  *   0x0000_3FC0  APP METADATA  64 B     stage-1 owns this, stage-0 ignores it
  *
