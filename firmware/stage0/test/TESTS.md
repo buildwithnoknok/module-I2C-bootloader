@@ -40,6 +40,36 @@ ever fail with "no LED Button" right after a passing `swd`/`i2c`, suspect that r
 
 ---
 
+## M tier — verify an installed stage-1 without `regress_all.sh` (~5 min)
+
+`regress_all.sh` is the **L tier**: Christopher runs it, never an agent unasked (it costs a
+whole usage window). For verifying a stage-1 that is already built and published — and for
+DEV-31 acceptance — run this sequence instead. It is the one that passed 5/5 on 12 Sep 2026
+for stage-1 1.2.0. Scripts are in `brain-Pico/software/`, run on the Pico with
+`./pico.py run <script>` from `/home/noknok/dev/pico` on the Pi.
+
+**Bench:** Pico with an LED Button and a buzzer on its I²C bus (both layout 2). On CIRCUITPY:
+`noknok.py`, `module_flasher.py`, the scripts below, `noknok_stage1_new.bin` (= the published
+`firmware/bin/noknok_stage1.bin`), and the layout-2 apps `keyboard_firmware.bin` and
+`buzzer_firmware.bin` (from each module repo's `firmware/bin/`). Step 3 also needs the
+WCH-LinkE on the LED Button's SWD pads; without it, skip step 3 and say so in the verdict.
+`bench_fw_state.py`'s raw scan hardcodes GP20/GP21; on a bench wired to the Conductor default
+GP8/GP9 trust only its state-file part (`"bl"` per UID), not its scan.
+
+| # | What | How | Pass |
+|---|---|---|---|
+| 1 | S · state before | `bench_fw_state.py`, or a 5-byte `0xB1` read at `0x7E` with a module in the bootloader | each module's stage-1 version + layout readable |
+| 2 | M · rollout through the Conductor | `bench_stage1_rollout.py` | every module reports `(1, 1, 2, 0, 2)` (proto 1, v1.2.0, layout 2), apps restored, `ALL PASS` |
+| 3 | M · silent app is parked (needs SWD) | on the Pi: `sh run_badapp_test.sh silentapp` (this folder) | witness `ff 5a 5a 5a ff` (ran exactly 3×), `APP UNHEALTHY` at `0x7E` (error 7), `GET_UID` answers |
+| 4 | M · rescue over the bus, no SWD | `./pico.py reset` and watch the boot log (real `code.py` path), or `bench_rescue.py` | `[RESCUE] … action=reflashed`, then both modules enumerate |
+| 5 | S · state after | `bench_fw_state.py` | nothing at `0x7E`; both modules on stage-1 1.2.0 layout 2 with their current apps |
+
+Leaves the bench as it found it (step 4 restores the parked LED Button). A FAIL at step 2 with
+`layout=None` means a pre-1.2.0 stage-1 answered (it reads `0x00` as byte 5): that is the
+fail-closed path, not a bug.
+
+---
+
 ## Step 1 — `swd` · stage-0 alone, driven over SWD (`run_swd_tests.sh`)
 
 Ten images built by `build_test_images.py`. Each = stage-0 + a *fake* stage-1 (writes a
@@ -147,8 +177,9 @@ end to end. A FAIL at "forgotten" is `_save_state()`; a FAIL at "did not reflash
 |---|---|---|
 | `brain-Pico/software/bench_rescue.py` | rescue path alone, on a module you parked by hand | debugging rescue |
 | `brain-Pico/software/bench_push_app.py` | push an app to the bench buzzer through `update_module()` and read `GET_VERSION` back | after changing a buzzer/knob/display app's boot block — those boards are not on the SWD rig |
+| `brain-Pico/software/bench_state_collision.py` | two UIDs never share one address in the saved state; restore never builds a phantom (12 Sep 2026 fix) | after changing `_save_state()` / `_restore_state()`; needs any two live modules, restores the state file |
 | `firmware/test/fast_erase_probe/` | the 64-byte fast-erase characterisation (2432 erases) | only if the silicon or the flash routine changes |
-| USB / CH32V203 side | not covered yet — needs the PIO-USB rig on the Pico | DEV-31 open item |
+| USB / CH32V203 side | not covered here — the USB bootloader has no stage-0/stage-1 design | DEV-26 (needs the PIO-USB rig, DEV-45) |
 
 ## Adding a test
 
