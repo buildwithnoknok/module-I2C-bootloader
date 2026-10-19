@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Copyright (c) noknok
  *
- * noknok Stage-0  v1.0.0   CH32V003   |  Stack: cnlohr/ch32fun
+ * noknok Stage-0  v1.0.0   CH32V003 + CH32X035   |  Stack: cnlohr/ch32fun
  * ============================================================================
  * THIS COMPONENT IS FROZEN. Once the production batch is programmed (DEV-29) it
  * can never be changed in the field. Everything above it — stage-1, the module
@@ -18,7 +18,15 @@
  * handoff cell, enable interrupts, set up the PLL, or touch PD1. All of that is
  * stage-1's job. That separation is what keeps this file small.
  *
- * ── Flash map (16 KB), layout 2 (current since 11 Sep 2026) ─────────────────
+ * ── One core, one port per chip (DEV-124) ───────────────────────────────────
+ * This file is the same for every chip. The few values that differ (flash
+ * size, page size, where the control block and the RAM cells are) come from
+ * ../port/port_<chip>.h. The V003 build is byte-identical to the one validated
+ * in DEV-31. The CH32X035 (noknok PicoHub power manager) runs layout 3:
+ * stage-0 1 KB, stage-1 4 KB @0x0400, app @0x1400, control block 0xF400,
+ * 256-byte pages - see port_ch32x035.h.
+ *
+ * ── Flash map (16 KB), CH32V003 layout 2 (current since 11 Sep 2026) ────────
  *   0x0000_0000  STAGE-0       1 KB     this code — FROZEN FOREVER (704 B used)
  *   0x0000_0400  STAGE-1       4 KB     the real bootloader — updatable
  *   0x0000_1400  APPLICATION   ~10.9 KB the module firmware — updatable
@@ -74,15 +82,16 @@
 
 #include "ch32fun.h"
 #include <stdint.h>
+#include "bl_port.h"     /* chip port: flash map, page size, RAM cells (DEV-124) */
 
 /* ── The two frozen addresses ─────────────────────────────────────────────── */
 #define STAGE1_BASE_EXEC   0x00000400U   /* execution alias — where we jump    */
 #define STAGE1_BASE_FLASH  0x08000400U   /* controller alias — where we write  */
-#define CTRL_FLASH         0x08003F80U   /* stage-1 update control block       */
+#define CTRL_FLASH         BL_CTRL_FLASH /* control block: V003 0x3F80, X035 0xF400 */
 
-/* ── Fixed properties of the part ─────────────────────────────────────────── */
-#define FLASH_END          0x08004000U   /* 16 KB                              */
-#define PAGE               64U           /* erase + program granularity        */
+/* ── Fixed properties of the part (from the port) ─────────────────────────── */
+#define FLASH_END          BL_FLASH_END  /* V003 16 KB, X035 62 KB             */
+#define PAGE               BL_PAGE       /* erase + program unit: V003 64, X035 256 */
 #define PAGE_WORDS         (PAGE / 4U)
 
 #define CTRL_MAGIC         0x6E6B5530U   /* "nkU0" — a stage-1 update is pending */
@@ -107,12 +116,13 @@ typedef struct {
  * reserves above the stack (next to stage-1's handoff cell at 0x200007F0), so
  * nothing else writes it and it survives a warm reset. High bits are a tag;
  * if they do not match — cold power-on, random SRAM — the count reads as 0. */
-#define ATTEMPT_CELL   (*(volatile uint32_t *)0x200007F4U)
+#define ATTEMPT_CELL   (*(volatile uint32_t *)(BL_RAM_CELLS + 4U))  /* V003 0x200007F4 */
 #define ATTEMPT_TAG    0x5A000000U
 #define ATTEMPT_MASK   0xFF000000U
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * FLASH  (CH32V003 fast 64-byte page path — bench-validated, DEV-31)
+ * FLASH  (fast page path — V003 64 B bench-validated in DEV-31; the X035 uses
+ *         the same sequence with a 256-byte page / 64-word buffer, DEV-124)
  * Plain CTLR writes, EOP cleared, never read-modify-write.
  * ═══════════════════════════════════════════════════════════════════════════ */
 

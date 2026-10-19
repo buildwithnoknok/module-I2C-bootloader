@@ -9,6 +9,28 @@ Stage-0 is frozen at manufacture; stage-1 is field-updatable (DEV-31). Versions 
 what `0xB1 GET_VERSION` at `0x7E` reports. There is no rollback: every stage-1 release is
 gated by `firmware/stage0/test/regress_all.sh`.
 
+## Chip ports - 2026-10-19 (DEV-124)
+
+- The bootloader is now one shared core plus a small port header per chip (`firmware/port/`).
+  **CH32V003:** no change: `noknok_stage0.bin` and `noknok_stage1.bin` (1.2.0) rebuild
+  byte-identical, so no version moves. **CH32X035** (the power manager of the noknok PicoHub,
+  MOD-0011): first build, flash layout 3. `mk_full.py` takes `--chip x035`. Breaking: no.
+
+## Stage-1 (CH32X035)
+
+### 1.0.0 - 2026-10-19
+- DEV-124 - First CH32X035 stage-1 (3392 B / 4 KB), same protocol and hardening as the V003
+  stage-1 1.2.0. Layout 3; header at base + 0x200 with target `X035`; VERIFY refuses an app
+  without the X035 app header (new error 9); 256 B pages programmed from four 64 B chunks; reset
+  flags left for the app on the boot path. Bench: updates, self-update to a 1.0.1 test build and
+  back, foreign-image refusal, interrupted update, 7 power cuts during updates. Breaking: no.
+
+## Stage-0 (CH32X035)
+
+### 1 KB frozen build - 2026-10-19 (688 B)
+- DEV-124 - Same source as the V003 stage-0; control block `0xF400`, 256 B pages, attempt cell
+  `0x20004FF4`. Frozen once the PicoHub production batch is programmed.
+
 ## Stage-1
 
 ### 1.2.0 — 12 Sep 2026

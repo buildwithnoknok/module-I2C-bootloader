@@ -1,0 +1,11 @@
+{
+  "format": 1,
+  "component": "stage1",
+  "chip": "CH32X035",
+  "version": "1.0.0",
+  "url": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-bootloader/main/firmware/bin/noknok_stage1_x035.bin",
+  "layout": 3,
+  "size": 3392,
+  "crc32": "febe532f",
+  "released": "2026-10-19"
+}

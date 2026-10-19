@@ -11,3 +11,5 @@ generated_*.ld
 !firmware/bin/noknok_bootloader.bin
 !firmware/bin/noknok_stage0.bin
 !firmware/bin/noknok_stage1.bin
+!firmware/bin/noknok_stage0_x035.bin
+!firmware/bin/noknok_stage1_x035.bin

@@ -63,9 +63,23 @@
 #include "ch32fun.h"
 #include <string.h>
 #include <stdint.h>
+#include "bl_port.h"   /* chip port (DEV-124): flash map, pages, pins, LED, IWDG */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * CONFIGURATION
+ *
+ * One core for every chip (DEV-124). The CH32V003 build is byte-identical to
+ * v1.2.0 as validated in DEV-31. The CH32X035 build (noknok PicoHub power
+ * manager, layout 3) differs only through ../port/port_ch32x035.h:
+ *   - 256-byte flash pages: WRITE_CHUNK still carries 64 bytes (the protocol
+ *     is the same for every module), so stage-1 collects four chunks in RAM
+ *     and programs the page when its last chunk arrives (or at VERIFY);
+ *   - control block 0xF400, metadata 0xF500, app region 0x1400..0xF3FF (56 KB);
+ *   - image headers carry a target id; VERIFY refuses an application that is
+ *     not an X035 image (error 9), VERIFY_STAGE1 a stage-1 that is not (8);
+ *   - the reset flags are left for the app on the boot path (it needs the
+ *     cold/warm distinction for the PD start-up);
+ *   - LED PB12, I2C1 remapped to PC16/PC17, watchdog clock 46.9 kHz.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 #define BL_I2C_ADDR        0x7E
@@ -76,6 +90,20 @@
  * monolithic bootloader does not implement it, so silence means "old world" —
  * that is how the Conductor tells the two fleets apart. */
 #define BL_PROTOCOL_VERSION 0x01
+/* Each chip has its own stage-1 version line (CHANGELOG.md): the V003 build is
+ * 1.2.0, the X035 build started at 1.0.0 (DEV-124). -D overrides are for test
+ * images (e.g. a 1.0.1 to prove a stage-1 self-update). */
+#if defined(BL_TARGET)
+#ifndef S1_VERSION_MAJOR
+#define S1_VERSION_MAJOR    1
+#endif
+#ifndef S1_VERSION_MINOR
+#define S1_VERSION_MINOR    0   /* X035 1.0.0: first release (DEV-124) */
+#endif
+#ifndef S1_VERSION_PATCH
+#define S1_VERSION_PATCH    0
+#endif
+#else
 #ifndef S1_VERSION_MAJOR
 #define S1_VERSION_MAJOR    1
 #endif
@@ -84,6 +112,7 @@
 #endif
 #ifndef S1_VERSION_PATCH
 #define S1_VERSION_PATCH    0
+#endif
 #endif
 
 /* Flash layout (flash-controller alias 0x08000000) */
@@ -101,15 +130,14 @@
  * They differ by 128 B (the control block + metadata pages). Keeping them as
  * separate named constants makes that intentional rather than a rounding
  * accident in the erase loop. */
-#define APP_REGION_LEN     (0x3F80U - 0x1400U)      /* 11136 B usable          */
-#define APP_ERASE_LEN      (0x4000U - 0x1400U)      /* 11 KB, 11 x 1 KB pages  */
+#define APP_REGION_LEN     (BL_CTRL_FLASH - APP_BASE_FLASH) /* V003 11136 B, X035 56 KB */
+#define APP_ERASE_LEN      (BL_FLASH_END - APP_BASE_FLASH)  /* V003 11 KB, X035 57 KB  */
 #define STAGE1_REGION_LEN  (APP_BASE_FLASH - STAGE1_BASE_FLASH)  /* 4 KB      */
-#define META_FLASH         (0x08000000U + 0x3FC0U)  /* app validity marker      */
-#define META_ERASE_PAGE    (0x08000000U + 0x3C00U)  /* 1 KB page holding it     */
-#define CTRL_FLASH         (0x08000000U + 0x3F80U)  /* stage-1 update control   */
+#define META_FLASH         BL_META_FLASH            /* app validity marker      */
+#define CTRL_FLASH         BL_CTRL_FLASH            /* stage-1 update control   */
 
 /* Handoff cell: top 16 bytes of RAM, reserved by the linker (stack ends below) */
-#define BL_MAGIC_CELL      (*(volatile uint32_t *)0x200007F0U)
+#define BL_MAGIC_CELL      (*(volatile uint32_t *)(BL_RAM_CELLS + 0U))   /* V003 0x200007F0 */
 #define BL_MAGIC_ENTER     0x6E6B4231U             /* "nkB1" — stay in the BL   */
 
 /* App boot-attempt counter (DEV-31 hardening C). No-init RAM, in the same
@@ -130,7 +158,7 @@
  * re-plug, a debugger reboot) is not mistaken for a crashing one. Found by the
  * first regression run: the SWD rig's reboots parked a good app. A 0xB0 reset
  * never counts — that path enters flash mode before jump_to_app() is reached. */
-#define APP_ATTEMPT_CELL   (*(volatile uint32_t *)0x200007F8U)
+#define APP_ATTEMPT_CELL   (*(volatile uint32_t *)(BL_RAM_CELLS + 8U))   /* V003 0x200007F8 */
 #define APP_ATTEMPT_TAG    0xA5000000U
 #define APP_ATTEMPT_MASK   0xFF000000U
 #define APP_MAX_ATTEMPTS   3U
@@ -147,15 +175,18 @@
  * a stage-1 built for a different MCU or a different flash layout, or plain
  * garbage with a matching CRC (the host computes the CRC over whatever it was
  * given) can no longer be installed as a bootloader. */
-#define HDR_OFFSET         0x100U
+#define HDR_OFFSET         BL_HDR_OFFSET           /* V003 0x100, X035 0x200    */
 #define HDR_MAGIC          0x31534B4EU             /* "NKS1" little-endian      */
-#define HDR_LAYOUT         2U                      /* CH32V003: 1K/4K/app@0x1400 (1 was 1K/3K/app@0x1000) */
+#define HDR_LAYOUT         BL_LAYOUT               /* V003 2: 1K/4K/app@0x1400 (1 was 1K/3K/app@0x1000); X035 3 */
 
 typedef struct {
     uint32_t magic;       /* HDR_MAGIC                                        */
     uint32_t base;        /* execution base this image is linked for          */
     uint32_t layout;      /* HDR_LAYOUT — flash map this image assumes        */
     uint32_t version;     /* (proto<<24)|(major<<16)|(minor<<8)|patch          */
+#if defined(BL_TARGET)
+    uint32_t target;      /* chip family, e.g. "X035" (DEV-124). The V003     */
+#endif                    /* header predates it and stays 16 bytes.           */
 } stage1_hdr_t;
 
 __attribute__((section(".stage1_hdr"), used))
@@ -166,9 +197,26 @@ const stage1_hdr_t stage1_hdr = {
     HDR_LAYOUT,
     ((uint32_t)BL_PROTOCOL_VERSION << 24) | ((uint32_t)S1_VERSION_MAJOR << 16) |
     ((uint32_t)S1_VERSION_MINOR   <<  8) |  (uint32_t)S1_VERSION_PATCH,
+#if defined(BL_TARGET)
+    BL_TARGET,
+#endif
 };
 
 #define ERR_NOT_STAGE1     8       /* VERIFY_STAGE1: staged image has no valid header */
+
+#if defined(BL_TARGET)
+/* ── Application image header (DEV-124, chip-family guard) ──────────────────
+ * Ports with a target id also require it in every APPLICATION image: 16 bytes
+ * {"NKA1", target, layout, version} at the same fixed offset from the app base
+ * (placed by the app's linker script). VERIFY refuses an image without it with
+ * error 9, before the metadata is written, so an image built for another chip
+ * (a V003 module app, or any file with a matching CRC) is never booted. */
+#define APP_HDR_MAGIC      0x31414B4EU             /* "NKA1" little-endian      */
+#define ERR_WRONG_APP      9
+typedef struct {
+    uint32_t magic, target, layout, version;
+} app_hdr_t;
+#endif
 
 /* Protocol commands */
 #define CMD_ERASE          0x01
@@ -186,8 +234,10 @@ const stage1_hdr_t stage1_hdr = {
 #define ST_READY           2
 #define ST_ERROR           3
 
-#define PAGE_BYTES         64
+#define PAGE_BYTES         64     /* WRITE_CHUNK payload: the same on every chip  */
 #define PAGE_WORDS         16
+#define FPAGE_BYTES        BL_PAGE              /* flash page: V003 64, X035 256  */
+#define FPAGE_WORDS        (FPAGE_BYTES / 4U)
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * FLASH STRUCTURES
@@ -271,10 +321,10 @@ static void flash_erase_1k(uint32_t addr)
     FLASH->CTLR  = 0;
 }
 
-/* 64-byte fast erase — bench-validated DEV-31 (1664 erases, zero failures).
- * Lets us rewrite the control block without disturbing the metadata page next
- * to it in the same 1 KB sector. */
-static void flash_erase_64(uint32_t addr)
+/* Fast page erase (FTER): one flash page, V003 64 B — bench-validated DEV-31
+ * (1664 erases, zero failures) — X035 256 B. Lets us rewrite the control block
+ * without disturbing the metadata page next to it in the same 1 KB sector. */
+static void flash_erase_page(uint32_t addr)
 {
     FLASH->CTLR  = FLASH_CTLR_PAGE_ER;
     FLASH->ADDR  = addr;
@@ -298,7 +348,7 @@ static void flash_program_page(uint32_t addr, const uint32_t *words)
     FLASH->ADDR = addr;
 
     volatile uint32_t *dst = (volatile uint32_t *)addr;
-    for (uint8_t i = 0; i < PAGE_WORDS; i++) {
+    for (uint8_t i = 0; i < FPAGE_WORDS; i++) {     /* V003 16, X035 64 words */
         dst[i]      = words[i];
         FLASH->CTLR = FLASH_CTLR_PAGE_PG | FLASH_CTLR_BUF_LOAD;
         while (FLASH->STATR & FLASH_STATR_BSY);
@@ -311,12 +361,16 @@ static void flash_program_page(uint32_t addr, const uint32_t *words)
 
 static void flash_write_meta(uint32_t app_len, uint32_t app_crc)
 {
-    uint32_t words[PAGE_WORDS];
+    uint32_t words[FPAGE_WORDS];
     memset(words, 0xFF, sizeof(words));
     words[0] = META_MAGIC;
     words[1] = app_len;
     words[2] = app_crc;
-    flash_erase_1k(META_ERASE_PAGE);
+#if defined(BL_META_ERASE_1K)
+    flash_erase_1k(BL_META_ERASE_1K);   /* V003: the 1 KB sector (see port) */
+#else
+    flash_erase_page(META_FLASH);       /* its own page, nothing else in it */
+#endif
     flash_program_page(META_FLASH, words);
 }
 
@@ -324,7 +378,7 @@ static void flash_write_meta(uint32_t app_len, uint32_t app_crc)
  * passed its CRC — until this lands, nothing is pending. */
 static void flash_write_ctrl(uint32_t len, uint32_t crc)
 {
-    uint32_t words[PAGE_WORDS];
+    uint32_t words[FPAGE_WORDS];
     memset(words, 0xFF, sizeof(words));
     words[0] = CTRL_MAGIC;
     words[1] = APP_BASE_FLASH;    /* staging_addr — the app region */
@@ -335,7 +389,7 @@ static void flash_write_ctrl(uint32_t len, uint32_t crc)
      * Stage-0 recomputes this and refuses the update on mismatch, so a
      * corrupt or half-written control block can never drive an erase. */
     words[5] = crc32_buf((const uint8_t *)words, 20);
-    flash_erase_64(CTRL_FLASH);   /* 64 B erase leaves metadata alone */
+    flash_erase_page(CTRL_FLASH); /* one page: leaves the metadata alone */
     flash_program_page(CTRL_FLASH, words);
 }
 
@@ -386,8 +440,10 @@ static void jump_to_app(void)
      * dead LSI can never keep us from booting the app. Cannot be
      * stopped except by reset: an app without a kick is parked after ~6 s —
      * that is the "watchdog mandatory" rule, enforced. */
-    IWDG->CTLR = 0x5555;  IWDG->PSCR = 4;       /* /64                        */
-    IWDG->CTLR = 0x5555;  IWDG->RLDR = 0xFFF;   /* 4095 -> ~2.05 s nominal    */
+    IWDG->CTLR = 0x5555;  IWDG->PSCR = BL_IWDG_PSCR;  /* /64                  */
+    IWDG->CTLR = 0x5555;  IWDG->RLDR = BL_IWDG_RLDR;  /* ~2 s (port: V003 4095
+                                                         at ~128 kHz, X035 1465
+                                                         at 46.9 kHz)          */
     IWDG->CTLR = 0xCCCC;                        /* start (LSI starts itself)  */
     for (uint32_t i = 0; i < 20000U && (IWDG->STATR & (IWDG_PVU | IWDG_RVU)); i++);
 
@@ -399,39 +455,31 @@ static void jump_to_app(void)
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * SWIO STATUS LED  (PD1, active-low)
+ * STATUS LED  (port: V003 PD1/SWIO active-low, X035 PB12 active-low)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void led_init(void)
 {
-    RCC->APB2PCENR |= RCC_APB2Periph_GPIOD;
-    GPIOD->CFGLR   &= ~(0xF << (1 * 4));
-    GPIOD->CFGLR   |=  ((GPIO_Speed_10MHz | GPIO_CNF_OUT_PP) << (1 * 4));
-    GPIOD->BSHR     =  (1 << 1);
+    bl_led_init();
 }
 
 static inline void led_set(uint8_t on)
 {
-    if (on) GPIOD->BCR  = (1 << 1);
-    else    GPIOD->BSHR = (1 << 1);
+    bl_led_set(on);
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * I2C SLAVE
+ * I2C SLAVE  (pins from the port: V003 PC1/PC2, X035 PC16/PC17 remapped)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static void i2c_slave_init(uint8_t addr)
 {
-    RCC->APB2PCENR |= RCC_APB2Periph_GPIOC;
-    RCC->APB1PCENR |= RCC_APB1Periph_I2C1;
-
-    GPIOC->CFGLR &= ~(0xF << (1 * 4)); GPIOC->CFGLR |= (0xF << (1 * 4));
-    GPIOC->CFGLR &= ~(0xF << (2 * 4)); GPIOC->CFGLR |= (0xF << (2 * 4));
+    bl_i2c_pins_init();
 
     I2C1->CTLR1 |=  I2C_CTLR1_SWRST;
     I2C1->CTLR1 &= ~I2C_CTLR1_SWRST;
 
-    I2C1->CTLR2  = 48;
+    I2C1->CTLR2  = BL_I2C_CTLR2;
     I2C1->CKCFGR = 240;
     I2C1->OADDR1 = ((uint16_t)addr << 1);
 
@@ -544,6 +592,8 @@ void I2C1_ER_IRQHandler(void)
  * COMMAND PROCESSING  (main loop; flash ops keep state = BUSY)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+#if FPAGE_BYTES == PAGE_BYTES
+/* One chunk = one flash page (V003): program it straight away. */
 static void do_write_chunk(void)
 {
     uint32_t offset = ((uint32_t)rx_buf[1] << 8) | rx_buf[2];
@@ -555,10 +605,51 @@ static void do_write_chunk(void)
     flash_program_page(APP_BASE_FLASH + offset, words);
     bl_state = ST_READY;
 }
+static inline void page_flush(void) { }
+static inline void page_forget(void) { }
+#else
+/* The flash page is bigger than a chunk (X035: 256 B = 4 chunks). Chunks are
+ * collected in a RAM page buffer and the page is programmed ONCE, when the
+ * chunk that ends it arrives, when a chunk for another page arrives, or at
+ * VERIFY / VERIFY_STAGE1 (the image's last, partial page). The host sends
+ * chunks in ascending order, so every page is programmed exactly once onto
+ * erased flash; gaps stay 0xFF, the erased value. Nothing about the protocol
+ * changes: the brain sends the same 64-byte WRITE_CHUNKs to every module. */
+#define NO_PAGE 0xFFFFFFFFU
+static uint32_t page_buf[FPAGE_WORDS];
+static uint32_t page_off = NO_PAGE;     /* app-relative offset of the buffered page */
+
+static void page_flush(void)
+{
+    if (page_off != NO_PAGE) {
+        flash_program_page(APP_BASE_FLASH + page_off, page_buf);
+        page_off = NO_PAGE;
+    }
+}
+static void page_forget(void) { page_off = NO_PAGE; }   /* ERASE: drop it */
+
+static void do_write_chunk(void)
+{
+    uint32_t offset = ((uint32_t)rx_buf[1] << 8) | rx_buf[2];
+    if (offset + PAGE_BYTES > APP_REGION_LEN || (offset & (PAGE_BYTES - 1U))) {
+        bl_state = ST_ERROR; last_error = 3; return;
+    }
+    uint32_t page = offset & ~(FPAGE_BYTES - 1U);
+    if (page != page_off) {
+        page_flush();
+        memset(page_buf, 0xFF, sizeof(page_buf));
+        page_off = page;
+    }
+    memcpy((uint8_t *)page_buf + (offset - page), (const void *)&rx_buf[3], PAGE_BYTES);
+    if (offset - page == FPAGE_BYTES - PAGE_BYTES) page_flush();   /* page complete */
+    bl_state = ST_READY;
+}
+#endif
 
 /* Shared by VERIFY and VERIFY_STAGE1: both CRC the staging area. */
 static int staged_crc_ok(uint32_t *len_out, uint32_t max_len)
 {
+    page_flush();                   /* X035: the last, partial page */
     uint32_t len = (uint32_t)rx_buf[1] | ((uint32_t)rx_buf[2] << 8) |
                    ((uint32_t)rx_buf[3] << 16) | ((uint32_t)rx_buf[4] << 24);
     uint32_t crc = (uint32_t)rx_buf[5] | ((uint32_t)rx_buf[6] << 8) |
@@ -577,6 +668,19 @@ static void do_verify(void)
 {
     uint32_t len;
     if (!staged_crc_ok(&len, APP_REGION_LEN)) return;
+
+#if defined(BL_TARGET)
+    /* Chip-family guard (DEV-124): the CRC proves the bytes arrived as sent,
+     * not that they are an app for THIS chip and flash layout. No metadata is
+     * written for a foreign image, so it is never booted; the module stays in
+     * flash mode and the host can push the right one. */
+    const volatile app_hdr_t *a =
+        (const volatile app_hdr_t *)(APP_BASE_FLASH + HDR_OFFSET);
+    if (len < HDR_OFFSET + sizeof(app_hdr_t) ||
+        a->magic != APP_HDR_MAGIC || a->target != BL_TARGET || a->layout != HDR_LAYOUT) {
+        bl_state = ST_ERROR; last_error = ERR_WRONG_APP; return;
+    }
+#endif
 
     uint32_t crc = (uint32_t)rx_buf[5] | ((uint32_t)rx_buf[6] << 8) |
                    ((uint32_t)rx_buf[7] << 16) | ((uint32_t)rx_buf[8] << 24);
@@ -599,6 +703,9 @@ static void do_verify_stage1(void)
     if (len < HDR_OFFSET + sizeof(stage1_hdr_t) ||
         h->magic  != HDR_MAGIC ||
         h->base   != 0x00000400U ||
+#if defined(BL_TARGET)
+        h->target != BL_TARGET ||
+#endif
         h->layout != HDR_LAYOUT) {
         bl_state = ST_ERROR; last_error = ERR_NOT_STAGE1; return;
     }
@@ -623,7 +730,11 @@ int main(void)
     /* Hardening C: the attempt series only continues across watchdog resets.
      * Read the cause, clear the flags so the next boot sees only its own. */
     uint32_t cause = RCC->RSTSCKR;
+#if !BL_RESET_FLAGS_FOR_APP
     RCC->RSTSCKR   = cause | RCC_RMVF;
+#endif
+    /* (X035: the flags stay for the app, which clears them at every start —
+     *  so an IWDG flag here is always from the reset that just happened.) */
     if (!(cause & RCC_IWDGRSTF))
         APP_ATTEMPT_CELL = 0;             /* not a crash: fresh series */
 
@@ -638,6 +749,12 @@ int main(void)
     }
 
     /* ── FLASH MODE ── */
+#if BL_RESET_FLAGS_FOR_APP
+    /* Staying here: clear the flags now, so an app installed later starts as a
+     * WARM start — the Pico is running from the buck by then and must not be
+     * rebooted by the app's cold-start PD sequence (port_ch32x035.h). */
+    RCC->RSTSCKR = cause | RCC_RMVF;
+#endif
     flash_unlock();
     led_init();
     i2c_slave_init(BL_I2C_ADDR);
@@ -655,7 +772,7 @@ int main(void)
 
     while (1)
     {
-        if (pend_erase)  { pend_erase = 0; flash_erase_app(); bl_state = ST_READY; }
+        if (pend_erase)  { pend_erase = 0; page_forget(); flash_erase_app(); bl_state = ST_READY; }
         if (pend_write)  { pend_write = 0; do_write_chunk(); }
         if (pend_verify) { pend_verify = 0; do_verify(); }
         if (pend_vs1)    { pend_vs1 = 0; do_verify_stage1(); }
@@ -669,7 +786,7 @@ int main(void)
         }
 
         uint32_t now = SysTick->CNT;
-        if ((uint32_t)(now - led_tick) > 1000000U) {
+        if ((uint32_t)(now - led_tick) > BL_LED_TICKS) {
             led_tick = now;
             led_on  ^= 1;
             led_set(led_on);

@@ -20,6 +20,13 @@ Bootloader — Design & Process (PoC v2 Step 4)".
 > both the I²C and SWD sides. `firmware/src/` (the monolithic bootloader) is still what every
 > existing module runs until they are re-flashed.
 
+> **CH32X035 port (Oct 2026, DEV-124):** the same stage-0/stage-1 runs on the CH32X035 power
+> manager of the noknok PicoHub (MOD-0011), **flash layout 3**. One source, one small port header
+> per chip (`firmware/port/`); the CH32V003 binaries rebuild byte-identical. Bench-validated over
+> I²C on 19 Oct 2026: app updates, stage-1 self-update 1.0.0 → 1.0.1, chip-family guard, an
+> interrupted update parked and rescued, 7 power cuts during updates with 7 recoveries. See
+> "Chip ports" below.
+
 ## Repo layout
 
 Version history: [`CHANGELOG.md`](CHANGELOG.md).
@@ -29,9 +36,11 @@ Version history: [`CHANGELOG.md`](CHANGELOG.md).
 | `firmware/stage0/` | Frozen stage-0 — applies stage-1 updates, then jumps to stage-1. Never changes after manufacture. | New (DEV-31) |
 | `firmware/stage1/` | The real bootloader, relinked to `0x0400`. I²C flashing + self-update. | New (DEV-31) |
 | `firmware/src/` | The original monolithic 4 KB bootloader. | **Legacy** — what shipped modules run until re-flashed; retire once they are |
-| `firmware/stage0/test/` | Stage-0 bench harness + test-image builder. | — |
+| `firmware/port/` | **Chip ports** (DEV-124): `port_ch32v003.h`, `port_ch32x035.h` — flash map, page size, RAM cells, I²C pins, LED, watchdog, reset-flag policy. Everything else is shared. | New (Oct 2026) |
+| `firmware/stage0/test/` | Stage-0 bench harness + test-image builder; `mk_full.py` builds the full SWD image (`--chip x035` for the PicoHub). | — |
 | `firmware/test/fast_erase_probe/` | Probe proving CH32V003 64-byte erase granularity. | — |
-| `firmware/bin/noknok_stage1.bin` | The **released** stage-1 — what brains in the field download. | 1.2.0 |
+| `firmware/bin/noknok_stage1.bin` | The **released** CH32V003 stage-1 — what brains in the field download. | 1.2.0 |
+| `firmware/bin/noknok_stage0_x035.bin`, `noknok_stage1_x035.bin` | The released CH32X035 stage-0 (688 B) and stage-1 (3392 B) for the noknok PicoHub; `firmware/index_x035.json` describes the stage-1 (layout 3). Not distributed over the air yet (no registry entry). | 1.0.0 |
 | `firmware/index.json` | **The field-distribution index for stage-1**: version, url, layout, size, crc32 — all required. Every brain reads it (via the Ecosystem registry, `bootloader.stage1`) on its daily check and brings any module below `version` up to it over the bus. **Update it in the same commit as the `.bin`, generated from the binary** — see [Ecosystem firmware-index.md](https://github.com/buildwithnoknok/Ecosystem/blob/main/software/firmware-index.md). This repo is public so raw URLs resolve. | New (12 Sep 2026) |
 | `docs/stage0-design.md` | Full stage-0 / stage-1 design spec. | — |
 
@@ -56,6 +65,35 @@ bootloader, and vice versa: the whole fleet moves together (SWD, once).
 
 The flash controller addresses flash via the `0x0800_0000` alias; execution/reset
 uses the `0x0000_0000` alias.
+
+## Chip ports (DEV-124)
+
+The protocol, the stage-0/stage-1 split, the control block, image header, CRC32, layout byte,
+boot-attempt counters and the boot decision are **one shared core** (`stage0/noknok_stage0.c`,
+`stage1/noknok_stage1.c`). What differs per chip is one header in `firmware/port/`:
+
+| | CH32V003 (I²C modules) | CH32X035 (noknok PicoHub power manager) |
+|---|---|---|
+| Flash layout id | **2** | **3** |
+| Flash | 16 KB, 64 B fast pages | 62 KB, 256 B fast pages (same FTER/FTPG sequence, 64-word buffer) |
+| Stage-0 / stage-1 / app | `0x0000` / `0x0400` / `0x1400` | `0x0000` / `0x0400` / `0x1400` (app up to `0xF3FF`, 56 KB) |
+| Control block / metadata | `0x3F80` / `0x3FC0` | `0xF400` / `0xF500` |
+| No-init RAM cells | `0x200007F0` | `0x20004FF0` |
+| Stage-1 header | base + `0x100`, 16 B | base + `0x200`, 20 B (+ target `X035`) |
+| App header required | no | yes: `NKA1`, target `X035`, layout 3 at app base + `0x200`, else VERIFY error **9** |
+| I²C pins | PC1/PC2 | PC16/PC17 (I2C1 remap), bus A of the PicoHub |
+| Status LED in flash mode | PD1, ~3 Hz | PB12 (D4), 1 Hz |
+| Watchdog armed before the app | ~2 s (LSI /64, 4095) | ~2 s (46.9 kHz /64, 1465) |
+| Reset flags | stage-1 reads and clears them | stage-1 leaves them for the app (cold vs warm start); clears them only in flash mode |
+
+Each chip has its own stage-1 version line (V003 1.2.0, X035 1.0.0). Layout ids are unique across
+chip families, so the brain's exact layout gate never pairs an image with the wrong chip, and a
+stage-1 refuses another family's stage-1 (error 8). With a 256 B flash page and the protocol's
+64 B `WRITE_CHUNK`, the X035 stage-1 collects four chunks in RAM and programs each page once.
+
+Build: `make` (V003) or `make CHIP=x035` in `stage0/` and `stage1/`; full SWD image:
+`python3 firmware/stage0/test/mk_full.py --chip x035 <stage0> <stage1> <app> <out>`.
+Bench tests for the X035: repo `module-I2C-picohub-MOD-0011`, `firmware/test/bl_x035_bench.py`.
 
 ## Boot decision (every reset)
 
