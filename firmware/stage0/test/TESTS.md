@@ -187,3 +187,29 @@ Add the image to `build_test_images.py` + a `check` line in `run_swd_tests.sh` (
 or a `bench_*.py` in brain-Pico that prints `ALL PASS` on success and raises on failure (bus /
 Conductor behaviour), then a `run` line in `regress_all.sh` **in an order that respects the
 board state** the neighbours expect, and a row here.
+
+
+---
+
+## CH32X035 / MOD-0011 tests (noknok PicoHub power manager) — added 22 Oct 2026 (DEV-135)
+
+The X035 bootloader port (DEV-124) and the power-manager firmware (DEV-121/122) have their own
+tests. They are **not** part of `regress_all.sh` (that one is the CH32V003 L tier). Scripts live
+in the repos named in the first column; run the Pico-side ones with `./pico.py run <script>`
+from the bench Pi.
+
+| Where | Script | Tier | What | Pass |
+|---|---|---|---|---|
+| module-I2C-picohub-MOD-0011 `firmware/test/` | `picohub_i2c_test.py` | M | I2C interface: enumeration as type 0x07, GET_VERSION, GET_STATUS CRC, caps, refusals, 20x bus-A cycle, SET_MIN_INPUT_VOLTAGE | `SUMMARY 22/22` (39/39 with the cycle loop) |
+| module-I2C-picohub-MOD-0011 `firmware/test/` | `conductor_enum_test.py` | M | the real Conductor enumerates the X035 (needs `noknok.mpy` on the Pico) | no collision, stable address |
+| module-I2C-picohub-MOD-0011 `firmware/test/` | `bl_x035_bench.py` | M | X035 bootloader: enter 0xB0, park, erase (an interrupted update looks the same); used by the rescue and DEV-134 tests | module back at 0x7E and rescued |
+| module-I2C-picohub-MOD-0011 `firmware/test/` | `picohub_thermal_log.py` | M | thermal logger (holds 20 V, logs NTC, V_IN, I_IN, V_5V every 10 s), DEV-146 | log complete, no fault |
+| brain-Pico `tools/bench/` | `bench_dev123.py`, `bench_dev123_cycle.py` | M | brain driver `c.picohub` (two phases around `reset_pico()`, status during `cycle_rail`) | no hang, same addresses |
+| brain-Pico `tools/bench/` | `pullrun.sh` | M | DEV-124 power pull during an X035 update (board fed from a Pi USB port, `uhubctl -l 2`) | board returns, update completes or rolls back |
+| brain-Pico `tools/bench/` | `bench_dev134_park_x035.py` | M | park the X035, rescue, hard reset, the USB module is found (DEV-134) | `[RESCUE] ... picohub reflashed`, no crash strikes |
+| brain-Pico `tools/bench/` | `bench_dev121_log.py`, `bench_dev122_load2.py`, `_load3.py` | M | change logger for hands-on tests and load tests (reset cause, current peak, scheduled minimum voltage) | see DEV-144 / DEV-145 for the open list |
+
+Rules for the X035 bench (from Sam and Bob, Oct 2026): flash with J1 on a 5 V source, not a PD
+charger with a running contract (a halted chip made the charger latch off); a half-seated J8
+clamp can halt the X035; never connect a logic analyzer or scope ground clip to anything above
+5 V without a 10:1 probe; the electronic load XY-KZ35 trips at 35.5 W.
