@@ -23,6 +23,8 @@ with the LED Button on its I2C bus, a pull-up source on the bus (a legacy buzzer
 doubles as the "other module" for step 7), the bench files listed at the top of `regress_all.sh`
 on the Pico. Read protection on the LED Button must be off.
 
+**Pico files (updated 10 Nov 2026, DEV-231):** the compiled `noknok.mpy` / `module_flasher.mpy` that a brain image ships are accepted by the preflight; do NOT push the big `noknok.py` source next to them (CircuitPython loads the source first and the Pico runs out of memory: the 9 Nov 2026 run on the product brain failed 4 steps that way). `badapp_status.py` takes the I2C pins from the Pico's `settings.toml` (bus A, then bus B), else the old GP8/GP9 wiring. The restore image is built with the RELEASE stage-1 (patch 0), so the board ends the run on the published bootloader.
+
 The runner **builds stage-0, stage-1 and the LED Button app from source** first (three stage-1
 versions PATCH 0 / 1 / 2 of whatever `S1_VERSION_*` says, e.g. 1.2.0 / 1.2.1 / 1.2.2; the
 full restore image is assembled by `mk_full.py`), so it tests what is checked out, not

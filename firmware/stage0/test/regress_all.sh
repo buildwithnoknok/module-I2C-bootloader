@@ -20,7 +20,7 @@
 # The stage-1 payloads are built and pushed by this script.
 #
 # ORDER MATTERS — each step leaves the board in a state the next one relies on:
-#   1 swd       ends: board restored (full image, stage-1 vX.Y.1, app)   [~60 s]
+#   1 swd       ends: board restored (full image, RELEASE stage-1 vX.Y.0, app) [~60 s]
 #   2 i2c       flashes its own start image (vX.Y.0); ends restored       [~30 s]
 #   3 conductor needs a running app + a DIFFERENT stage-1 (pushes vX.Y.2) [~15 s]
 #   4 wrongfile needs a running app; ends restored                        [~15 s]
@@ -54,15 +54,19 @@ lsusb | grep -q 1a86:8010 || { echo "FAIL: WCH-LinkE not on USB"; exit 2; }
 ls /dev/serial/by-id/usb-Raspberry_Pi_Pico*-if00 >/dev/null 2>&1 || { echo "FAIL: Pico not on USB"; exit 2; }
 $M -i 2>&1 | grep -q 'Detected CH32V003' || { echo "FAIL: no CH32V003 on SWD"; exit 2; }
 LS=$(cd $P && ./pico.py ls / 2>/dev/null)
+# noknok / module_flasher may be the compiled .mpy (a brain image ships only those, DEV-38) or the .py
+# source: either is fine. Do NOT push the big noknok.py source next to the .mpy: Python loads the source
+# first and the Pico runs out of memory (the 9 Nov 2026 run, DEV-231).
 for f in noknok.py module_flasher.py bench_stage1.py bench_conductor_stage1.py \
          bench_wrongfile.py bench_state_merge.py keyboard_firmware.bin; do
-  echo "$LS" | grep -q "$f" || { echo "FAIL: $f not on the Pico"; exit 2; }
+  case $f in noknok.py) pat='noknok\.m\{0,1\}py';; module_flasher.py) pat='module_flasher\.m\{0,1\}py';; *) pat=$f;; esac
+  echo "$LS" | grep -q "$pat" || { echo "FAIL: $f (or its .mpy) not on the Pico"; exit 2; }
 done
 echo "LinkE, Pico (+ bench files), chip: ok"
 
 # -- build everything from SOURCE so we test what is committed, not leftovers --
 # Three stage-1 versions (X.Y = the committed major.minor): vX.Y.0 = start state
-# for the I2C test, vX.Y.1 = its payload and the version in the "full" restore
+# for the I2C test, vX.Y.1 = its payload, vX.Y.0 is also the "full" restore
 # image, vX.Y.2 = the Conductor
 # test's payload (it must differ from what is installed, or nothing is proven).
 echo "=== build ==="
@@ -81,7 +85,9 @@ build_s1() {  # build_s1 <patch> <out.bin>   (run inside $S1)
 ( cd $APP && make clean >/dev/null 2>&1 && make build >/tmp/build_app.log 2>&1 \
     && ls -l keyboard_firmware.bin | awk '{print "LED Button app:", $5, "B"}' ) \
   || { tail -5 /tmp/build_app.log; echo "FAIL: LED Button app build"; exit 2; }
-python3 $T/mk_full.py $T/../noknok_stage0.bin $S1/s1_0400_v101.bin $APP/keyboard_firmware.bin $FULL || exit 2
+# restore image = the RELEASE stage-1 (patch 0 build = byte-identical to firmware/bin/noknok_stage1.bin), so the
+# board never ends the run on a test bootloader (DEV-231)
+python3 $T/mk_full.py $T/../noknok_stage0.bin $S1/s1_0400_v100.bin $APP/keyboard_firmware.bin $FULL || exit 2
 cp $APP/keyboard_firmware.bin $P/keyboard_firmware.bin
 ( cd $P && ./pico.py put keyboard_firmware.bin >/dev/null ) || { echo "FAIL: could not push the app to the Pico"; exit 2; }
 cp $S1/s1_0400_v101.bin $P/noknok_stage1_v101.bin
