@@ -1,0 +1,48 @@
+{
+  "format": 1,
+  "registry_version": "2.0.0-dev128-test",
+  "updated": "2026-11-16",
+  "_comment": "Official noknok module registry: maps each module type string to its firmware index, and names the current stage-1 bootloader index per chip family. The brain fetches this, then each index.json, to decide what firmware to install. See firmware-index.md. A repo must be PUBLIC for the brain to reach its index; private-repo modules are listed here only once their repo is public.",
+  "bootloader": {
+    "stage1": {
+      "CH32V003": {
+        "repo": "module-I2C-bootloader",
+        "index": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-bootloader/main/firmware/index.json"
+      },
+      "CH32X035": {
+        "repo": "module-I2C-bootloader",
+        "index": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-bootloader/dev-128-test/firmware/test/dev128/index_x035_101.json"
+      }
+    }
+  },
+  "modules": {
+    "buzzer": {
+      "repo": "module-I2C-buzzer",
+      "index": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-buzzer/main/firmware/index.json"
+    },
+    "knob": {
+      "repo": "module-I2C-knob",
+      "index": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-knob/main/firmware/index.json"
+    },
+    "led_button": {
+      "repo": "module-I2C-ledbutton",
+      "index": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-ledbutton/main/firmware/index.json"
+    },
+    "usb_leds": {
+      "repo": "module-usb-led",
+      "index": "https://raw.githubusercontent.com/buildwithnoknok/module-usb-led/main/firmware/index.json"
+    },
+    "display": {
+      "repo": "module-I2C-1.42-display",
+      "index": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-1.42-display/main/firmware/index.json"
+    },
+    "usb_leds_16x": {
+      "repo": "module-usb-led-16x",
+      "index": "https://raw.githubusercontent.com/buildwithnoknok/module-usb-led-16x/main/firmware/index.json"
+    },
+    "picohub": {
+      "repo": "module-I2C-picohub-MOD-0011",
+      "index": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-picohub-MOD-0011/main/firmware/index.json"
+    }
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "format": 1,
+  "component": "stage1",
+  "chip": "CH32X035",
+  "version": "1.0.1",
+  "url": "https://raw.githubusercontent.com/buildwithnoknok/module-I2C-bootloader/dev-128-test/firmware/test/dev128/noknok_stage1_x035_101.bin",
+  "layout": 3,
+  "size": 3392,
+  "crc32": "11a87ba8",
+  "released": "2026-11-16",
+  "_comment": "DEV-128 BENCH TEST ONLY: stage-1 X035 built with -DS1_VERSION_PATCH=1 (no code change). Never referenced from the official registry."
+}
