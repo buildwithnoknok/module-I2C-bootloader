@@ -9,6 +9,10 @@ Stage-0 is frozen at manufacture; stage-1 is field-updatable (DEV-31). Versions 
 what `0xB1 GET_VERSION` at `0x7E` reports. There is no rollback: every stage-1 release is
 gated by `firmware/stage0/test/regress_all.sh`.
 
+## Test tooling - 2026-11-17 (DEV-77)
+
+- DEV-77 - bench helpers that lived only on a bench host are now in `firmware/tools/bench/` (Buzzer layout-2 SWD restore + verify, stage-1 install on the bench Buzzer, parked-module probe, layout-2 image inspectors). Tools only, no firmware change. Breaking: no.
+
 ## Test tooling - 2026-11-10 (DEV-231)
 
 - `regress_all.sh`: preflight accepts the compiled `noknok.mpy` / `module_flasher.mpy` (no 250 KB source on a product brain); the restore image uses the release stage-1 (patch 0), not the test build; `badapp_status.py` reads its I2C pins from `settings.toml`. Found by the 9 Nov 2026 run on a PicoHub rig (4 steps MemoryError, 2 steps wrong pins). Dry-checked only (shell syntax, preflight cases, pin fallback with stubs); the suite was not re-run. No firmware change, no version change.
