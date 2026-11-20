@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: MIT
  * Copyright (c) noknok
  *
- * noknok Stage-1  v1.2.0   CH32V003   |  Stack: cnlohr/ch32fun
+ * noknok Stage-1  v1.3.0 (CH32V003) / v1.1.0 (CH32X035)   |  Stack: cnlohr/ch32fun
  * ============================================================================
  * The real bootloader: re-flashes a module's APPLICATION over I2C, exactly as
  * the monolithic bootloader always did. What is new (DEV-31) is that stage-1 is
@@ -18,7 +18,7 @@
  *   0x0000_0400  STAGE-1       4 KB     this code — updatable via stage-0
  *   0x0000_1400  APPLICATION   ~10.9 KB flashed over I2C; also the STAGING area
  *   0x0000_3F80  CONTROL BLOCK 64 B     stage-1 update marker, read by stage-0
- *   0x0000_3FC0  METADATA      64 B     {magic, app_len, app_crc32}
+ *   0x0000_3FC0  METADATA      64 B     {magic, app_len, app_crc32, type}
  *
  * ── Boot decision (stage-0 has already run) ─────────────────────────────────
  *   1. handoff magic set in no-init RAM?  -> FLASH MODE (app requested update)
@@ -34,7 +34,19 @@
  *     [0x05]                              BOOT (app, or reset to apply stage-1)
  *     [0xB1]                              GET_VERSION -> next read gives 5 bytes
  *     [0xB3]                              GET_UID -> next read gives the 8-byte chip UID
- *   Master READ:  [state, last_error], 5 version bytes after 0xB1, 8 UID bytes after 0xB3.
+ *     [0xB4]                              GET_ID  -> next read gives [UID x8][TYPE][CRC8]
+ *   Master READ:  [state, last_error], 5 version bytes after 0xB1, 8 UID bytes after 0xB3,
+ *                 10 identity bytes after 0xB4 (ADR-005, V003 1.3.0 / X035 1.1.0).
+ *
+ * -- Module type (ADR-005, DEV-22) ------------------------------------------
+ * A parked module must be able to say WHAT it is, so the brain can push the
+ * right app even if it never enumerated on that brain. The type is word 3 of
+ * the metadata page. VERIFY writes it together with magic/len/crc (from the
+ * app header, or the port's fixed type). ERASE wipes the metadata page on
+ * purpose, so it remembers the type in RAM first and programs ONLY the type
+ * word back: the magic stays blank, a half-loaded image is never booted.
+ * Known window: a power cut between the last erase and that one page program
+ * loses the type (0xB4 then reports 0; the brain falls back to its saved state).
  *
  * ── Watchdog contract (v1.2.0) ──────────────────────────────────────────────
  * jump_to_app() ARMS THE IWDG (~2 s) before handing over. An application that
@@ -98,7 +110,7 @@
 #define S1_VERSION_MAJOR    1
 #endif
 #ifndef S1_VERSION_MINOR
-#define S1_VERSION_MINOR    0   /* X035 1.0.0: first release (DEV-124) */
+#define S1_VERSION_MINOR    1   /* X035 1.1.0: 0xB4 GET_ID + type in the metadata (DEV-22). 1.0.0: first release (DEV-124) */
 #endif
 #ifndef S1_VERSION_PATCH
 #define S1_VERSION_PATCH    0
@@ -108,7 +120,7 @@
 #define S1_VERSION_MAJOR    1
 #endif
 #ifndef S1_VERSION_MINOR
-#define S1_VERSION_MINOR    2   /* 1.2.0: IWDG armed before the app; 0xB1 reports layout. 1.1.0: layout 2, app at 0x1400 */
+#define S1_VERSION_MINOR    3   /* 1.3.0: 0xB4 GET_ID, type in the metadata, V3 SWD window + LED (DEV-22). 1.2.0: IWDG armed before the app; 0xB1 reports layout. 1.1.0: layout 2, app at 0x1400 */
 #endif
 #ifndef S1_VERSION_PATCH
 #define S1_VERSION_PATCH    0
@@ -204,18 +216,29 @@ const stage1_hdr_t stage1_hdr = {
 
 #define ERR_NOT_STAGE1     8       /* VERIFY_STAGE1: staged image has no valid header */
 
-#if defined(BL_TARGET)
-/* ── Application image header (DEV-124, chip-family guard) ──────────────────
+/* ── Application image header (DEV-124 chip-family guard; DEV-21/22 type) ──────────────────
  * Ports with a target id also require it in every APPLICATION image: 16 bytes
  * {"NKA1", target, layout, version} at the same fixed offset from the app base
  * (placed by the app's linker script). VERIFY refuses an image without it with
  * error 9, before the metadata is written, so an image built for another chip
- * (a V003 module app, or any file with a matching CRC) is never booted. */
+ * (a V003 module app, or any file with a matching CRC) is never booted.
+ *
+ * V003 (DEV-21): the header is 20 bytes, word 4 = module type, and it is
+ * OPTIONAL - no "NKA1" = an older app, installed as before with type 0. A
+ * header that names another chip or layout is refused with error 9. */
 #define APP_HDR_MAGIC      0x31414B4EU             /* "NKA1" little-endian      */
 #define ERR_WRONG_APP      9
+#define CMD_GET_ID         0xB4   /* ADR-005: next read = [UID x8][TYPE][CRC8]      */
 typedef struct {
     uint32_t magic, target, layout, version;
+    uint32_t type;        /* V003 only (BL_APP_HDR_TYPE); X035 headers are 16 B */
 } app_hdr_t;
+#if defined(BL_TARGET)
+#define APP_TARGET         BL_TARGET
+#define APP_HDR_LEN        16U
+#else
+#define APP_TARGET         BL_APP_TARGET
+#define APP_HDR_LEN        20U
 #endif
 
 /* Protocol commands */
@@ -247,6 +270,7 @@ typedef struct {
     uint32_t magic;
     uint32_t app_len;
     uint32_t app_crc32;
+    uint32_t type;          /* module type, ADR-005 (0xFFFFFFFF = written by <= 1.2.0) */
 } meta_t;
 
 /* Read by stage-0. Field order is a frozen contract — see docs/stage0-design.md. */
@@ -278,11 +302,18 @@ static volatile uint8_t  pend_boot   = 0;
 static volatile uint8_t  rx_buf[RX_BUF_SIZE];
 static volatile uint8_t  rx_len = 0;
 
-static volatile uint8_t  tx_buf[8];
+static volatile uint8_t  tx_buf[10];
 static volatile uint8_t  tx_idx = 0;
-static volatile uint8_t  tx_len = 2;   /* 2 = [state,err]; 5 after GET_VERSION; 8 after GET_UID */
+static volatile uint8_t  tx_len = 2;   /* 2 = [state,err]; 5 after GET_VERSION; 8 after GET_UID; 10 after GET_ID */
 static volatile uint8_t  version_pending = 0;
 static volatile uint8_t  uid_pending     = 0; /* set in ISR on 0xB3; next read returns the UID */
+static volatile uint8_t  id_pending      = 0; /* set in ISR on 0xB4; next read returns the identity */
+
+/* Module type this module reports in 0xB4 (ADR-005). Kept in RAM so the ISR
+ * never reads flash: set at flash-mode start from the metadata, updated by
+ * VERIFY, and deliberately KEPT across ERASE (that is the point). */
+static volatile uint8_t  mod_type = 0;
+static uint8_t           xfer     = 0; /* LED: a transfer is in progress     */
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * CRC32  (standard zlib: poly 0xEDB88320, init 0xFFFFFFFF, final XOR)
@@ -297,6 +328,19 @@ static uint32_t crc32_buf(const uint8_t *data, uint32_t len)
             crc = (crc & 1) ? (crc >> 1) ^ 0xEDB88320U : (crc >> 1);
     }
     return ~crc;
+}
+
+/* CRC-8 (poly 0x07, init 0) - the same checksum every module app puts on its
+ * 0x7F enumeration reply, so 0xB4 here is byte-for-byte the same format. */
+static uint8_t crc8(const volatile uint8_t *data, uint8_t len)
+{
+    uint8_t crc = 0;
+    for (uint8_t i = 0; i < len; i++) {
+        crc ^= data[i];
+        for (uint8_t b = 0; b < 8; b++)
+            crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0x07) : (uint8_t)(crc << 1);
+    }
+    return crc;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -359,13 +403,14 @@ static void flash_program_page(uint32_t addr, const uint32_t *words)
     FLASH->CTLR  = 0;
 }
 
-static void flash_write_meta(uint32_t app_len, uint32_t app_crc)
+static void flash_write_meta(uint32_t app_len, uint32_t app_crc, uint32_t type)
 {
     uint32_t words[FPAGE_WORDS];
     memset(words, 0xFF, sizeof(words));
     words[0] = META_MAGIC;
     words[1] = app_len;
     words[2] = app_crc;
+    words[3] = type;                    /* ADR-005: survives in 0xB4 */
 #if defined(BL_META_ERASE_1K)
     flash_erase_1k(BL_META_ERASE_1K);   /* V003: the 1 KB sector (see port) */
 #else
@@ -404,6 +449,26 @@ static int app_is_valid(void)
     if (META->app_len > APP_REGION_LEN)   return 0;
     uint32_t crc = crc32_buf((const uint8_t *)APP_BASE_FLASH, META->app_len);
     return (crc == META->app_crc32);
+}
+
+/* The type this module last had installed (ADR-005): metadata word 3; for
+ * metadata written by stage-1 <= 1.2.0 (word 3 blank) the installed app's
+ * header (DEV-21 apps carry it); else the port's fixed type, else 0. */
+static uint8_t known_type(void)
+{
+    uint32_t t = META->type;
+    if (t <= 0xFFU) return (uint8_t)t;
+#if defined(BL_APP_HDR_TYPE)
+    const volatile app_hdr_t *a = (const volatile app_hdr_t *)(APP_BASE_FLASH + HDR_OFFSET);
+    if (a->magic == APP_HDR_MAGIC && a->target == APP_TARGET &&
+        a->layout == HDR_LAYOUT && a->type <= 0xFFU)
+        return (uint8_t)a->type;
+#endif
+#if defined(BL_FIXED_TYPE)
+    return BL_FIXED_TYPE;
+#else
+    return 0;
+#endif
 }
 
 static int stage1_update_pending(void)
@@ -513,6 +578,14 @@ void I2C1_EV_IRQHandler(void)
                  * out 0x00 here (TXE pads past tx_len), so 0 = "did not say". */
                 tx_buf[4] = (uint8_t)stage1_hdr.layout;
                 tx_len    = 5;
+            } else if (id_pending) {
+                /* ADR-005: the same 10 bytes an app sends at 0x7F during
+                 * enumeration, with the type remembered across ERASE. */
+                id_pending = 0;
+                for (uint8_t i = 0; i < 8; i++) tx_buf[i] = UID_ADDR[i];
+                tx_buf[8] = mod_type;
+                tx_buf[9] = crc8(tx_buf, 9);
+                tx_len    = 10;
             } else if (uid_pending) {
                 /* Same 8 bytes, same order, as the app's enumeration reply —
                  * so the host can match a module parked here to the type it
@@ -570,6 +643,9 @@ void I2C1_EV_IRQHandler(void)
                 break;
             case CMD_GET_UID:
                 uid_pending = 1;
+                break;
+            case CMD_GET_ID:
+                id_pending = 1;     /* latched here, never via the main loop */
                 break;
             default:
                 break;
@@ -646,6 +722,25 @@ static void do_write_chunk(void)
 }
 #endif
 
+/* ERASE (DEV-22): the erase loop wipes the whole app region, the control block
+ * and the metadata page (APP_ERASE_LEN runs to the end of flash, on purpose).
+ * The module type is in RAM (mod_type), so afterwards program ONLY the type
+ * word back into the blank metadata page. The magic stays 0xFFFFFFFF, so
+ * app_is_valid() is false until VERIFY: a half-loaded image never boots. */
+static void do_erase(void)
+{
+    page_forget();
+    flash_erase_app();
+    if (mod_type) {
+        uint32_t words[FPAGE_WORDS];
+        memset(words, 0xFF, sizeof(words));
+        words[3] = mod_type;
+        flash_program_page(META_FLASH, words);
+    }
+    xfer     = 1;
+    bl_state = ST_READY;
+}
+
 /* Shared by VERIFY and VERIFY_STAGE1: both CRC the staging area. */
 static int staged_crc_ok(uint32_t *len_out, uint32_t max_len)
 {
@@ -669,22 +764,33 @@ static void do_verify(void)
     uint32_t len;
     if (!staged_crc_ok(&len, APP_REGION_LEN)) return;
 
-#if defined(BL_TARGET)
     /* Chip-family guard (DEV-124): the CRC proves the bytes arrived as sent,
      * not that they are an app for THIS chip and flash layout. No metadata is
      * written for a foreign image, so it is never booted; the module stays in
      * flash mode and the host can push the right one. */
     const volatile app_hdr_t *a =
         (const volatile app_hdr_t *)(APP_BASE_FLASH + HDR_OFFSET);
-    if (len < HDR_OFFSET + sizeof(app_hdr_t) ||
-        a->magic != APP_HDR_MAGIC || a->target != BL_TARGET || a->layout != HDR_LAYOUT) {
+    int has_hdr = (len >= HDR_OFFSET + APP_HDR_LEN) && a->magic == APP_HDR_MAGIC;
+#if defined(BL_TARGET)
+    if (!has_hdr) { bl_state = ST_ERROR; last_error = ERR_WRONG_APP; return; }   /* X035: mandatory */
+#endif
+    if (has_hdr && (a->target != APP_TARGET || a->layout != HDR_LAYOUT)) {
         bl_state = ST_ERROR; last_error = ERR_WRONG_APP; return;
     }
+
+    uint8_t type = 0;                     /* V003 app without a header: type 0 */
+#if defined(BL_APP_HDR_TYPE)
+    if (has_hdr && a->type <= 0xFFU) type = (uint8_t)a->type;
+#endif
+#if defined(BL_FIXED_TYPE)
+    type = BL_FIXED_TYPE;
 #endif
 
     uint32_t crc = (uint32_t)rx_buf[5] | ((uint32_t)rx_buf[6] << 8) |
                    ((uint32_t)rx_buf[7] << 16) | ((uint32_t)rx_buf[8] << 24);
-    flash_write_meta(len, crc);
+    flash_write_meta(len, crc, type);
+    mod_type = type;
+    xfer     = 0;
     APP_ATTEMPT_CELL = 0;         /* a freshly installed app gets a clean slate */
     bl_state = ST_READY;
 }
@@ -756,7 +862,10 @@ int main(void)
     RCC->RSTSCKR = cause | RCC_RMVF;
 #endif
     flash_unlock();
-    led_init();
+    mod_type = known_type();
+#if !defined(BL_SWD_WINDOW_TICKS)
+    led_init();                           /* V3 ports: only after the SWD window */
+#endif
     i2c_slave_init(BL_I2C_ADDR);
     bl_state = ST_IDLE;
     if (app_unhealthy) {
@@ -767,12 +876,17 @@ int main(void)
 
     __enable_irq();
 
-    uint32_t led_tick = 0;
+    uint32_t led_tick = SysTick->CNT;
+#if defined(BL_SWD_WINDOW_TICKS)
+    uint8_t  led_live = 0;                /* 0 = still in the SWD window */
+    uint8_t  slot     = 0;
+#else
     uint8_t  led_on   = 0;
+#endif
 
     while (1)
     {
-        if (pend_erase)  { pend_erase = 0; page_forget(); flash_erase_app(); bl_state = ST_READY; }
+        if (pend_erase)  { pend_erase = 0; do_erase(); }
         if (pend_write)  { pend_write = 0; do_write_chunk(); }
         if (pend_verify) { pend_verify = 0; do_verify(); }
         if (pend_vs1)    { pend_vs1 = 0; do_verify_stage1(); }
@@ -786,10 +900,35 @@ int main(void)
         }
 
         uint32_t now = SysTick->CNT;
+#if defined(BL_SWD_WINDOW_TICKS)
+        /* Flashing Interface V3 (DEV-22). First ~2 s: PD1 untouched, SDI live,
+         * a plain SWD connect works. Then SDI off and per-state LED patterns
+         * over a 2 s frame of 20 x 100 ms slots (bit n = slot n on):
+         *   error / parked (state 3)  fast blink 5 Hz
+         *   transfer since ERASE      slow pulse 1 Hz
+         *   waiting, no valid app     double blink every 2 s
+         * The I2C status at 0x7E stays the authoritative channel. */
+        if (!led_live) {
+            if ((uint32_t)(now - led_tick) > BL_SWD_WINDOW_TICKS) {
+                bl_sdi_disable();
+                led_init();
+                led_live = 1;
+                led_tick = now;
+            }
+        } else if ((uint32_t)(now - led_tick) >= BL_LED_SLOT_TICKS) {
+            led_tick += BL_LED_SLOT_TICKS;
+            if (++slot >= 20) slot = 0;
+            uint32_t pat = (bl_state == ST_ERROR) ? 0x55555U
+                         : xfer                   ? 0x07C1FU
+                         :                          0x00005U;
+            led_set((pat >> slot) & 1U);
+        }
+#else
         if ((uint32_t)(now - led_tick) > BL_LED_TICKS) {
             led_tick = now;
             led_on  ^= 1;
             led_set(led_on);
         }
+#endif
     }
 }

@@ -9,6 +9,29 @@ Stage-0 is frozen at manufacture; stage-1 is field-updatable (DEV-31). Versions 
 what `0xB1 GET_VERSION` at `0x7E` reports. There is no rollback: every stage-1 release is
 gated by `firmware/stage0/test/regress_all.sh`.
 
+## Stage-1 V003 1.3.0 + X035 1.1.0 - 2026-11-20 (DEV-22) - NOT RELEASED
+
+Source only on branch `dev-22-stage1-v3-id`; `firmware/bin/` and `index*.json` unchanged until
+the bench runs and the L-tier regression pass (release build on the bench toolchain).
+
+- **`0xB4 GET_ID` (ADR-005)** at `0x7E`: next read = `[UID x8][TYPE][CRC8]`, the same 10 bytes
+  as an app's 0x7F enumeration reply; latched in the ISR at STOP like `0xB1`/`0xB3`.
+- **Module type in the metadata page** (word 3). VERIFY writes it from the app header (V003:
+  `{"NKA1","V003",2,version,type}` at app base + 0x100, DEV-21) or the fixed type (X035:
+  0x07). ERASE keeps it: it programs only the type word back into the blank metadata page,
+  the magic stays blank, a half-loaded image never boots. Survives a stage-1 self-update too.
+- **V003 app header check (tolerant):** no header = installs as before with type 0; a header
+  for another chip or layout = error 9 (no metadata written).
+- **V003 Flashing Interface V3:** in flash mode PD1 is left alone for ~2 s (plain SWD connect
+  works), then SDI is disabled (`AFIO->PCFR1` SWCFG = 0b100, volatile) and the LED shows
+  double blink (waiting), 1 Hz (transfer since ERASE) or 5 Hz (error / parked). The normal
+  boot path (valid app) does NOT touch SDI or PD1. Test builds: `-DBL_V3_OFF` keeps the old
+  LED and never disables SDI (the regression scripts read flash over SWD in flash mode).
+- `mk_full.py` writes the type word into the metadata (from the app header; X035 0x07).
+- Size (agent-hq gcc 14.2, ch32fun 95030fd, not the release toolchain): V003 3516 B of 4096
+  (+520 B on that toolchain's 2996 B baseline), X035 3680 B of 4096 (+280 B). Breaking: no
+  (layouts, `0xB1`, `0xB3` and the update protocol unchanged). Not tested on hardware yet.
+
 ## Test tooling - 2026-11-17 (DEV-77)
 
 - DEV-77 - bench helpers that lived only on a bench host are now in `firmware/tools/bench/` (Buzzer layout-2 SWD restore + verify, stage-1 install on the bench Buzzer, parked-module probe, layout-2 image inspectors). Tools only, no firmware change. Breaking: no.

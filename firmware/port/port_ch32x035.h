@@ -57,6 +57,10 @@
 #define BL_LAYOUT          3U
 #define BL_HDR_OFFSET      0x200U         /* past the X035 vector table (312 B) */
 #define BL_TARGET          0x35333058U    /* "X035" little-endian               */
+/* Module type reported by 0xB4 GET_ID (ADR-005, stage-1 1.1.0) and written
+ * into the metadata at VERIFY. The X035 app header has no type word (16 B);
+ * the only X035 module is the PicoHub power manager, standard type 0x07. */
+#define BL_FIXED_TYPE      0x07U
 
 /* ── No-init RAM cells ─────────────────────────────────────────────────────── */
 #define BL_RAM_CELLS       0x20004FF0U

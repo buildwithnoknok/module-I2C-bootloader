@@ -40,6 +40,20 @@ img[STAGE1_BASE:STAGE1_BASE + len(s1)] = s1
 img[APP_BASE:APP_BASE + len(app)] = app
 crc = zlib.crc32(app) & 0xffffffff
 img[META_OFF:META_OFF + 12] = struct.pack('<III', META_MAGIC, len(app), crc)
+# Module type, metadata word 3 (ADR-005, DEV-22): what stage-1 VERIFY would write.
+# V003: word 4 of the app header {"NKA1","V003",2,version,type} at +0x100 (DEV-21
+# apps); X035: the PicoHub's fixed type 0x07. No header = leave it blank, which
+# stage-1 >= 1.3.0 reports as type 0 (and <= 1.2.0 ignores the word anyway).
+mtype = None
+if chip == 'x035':
+    mtype = 0x07
+elif len(app) >= 0x100 + 20:
+    magic, target, layout, _ver, t = struct.unpack_from('<5I', app, 0x100)
+    if magic == 0x31414B4E and target == 0x33303056 and layout == 2 and t <= 0xFF:
+        mtype = t
+if mtype is not None:
+    img[META_OFF + 12:META_OFF + 16] = struct.pack('<I', mtype)
 open(out, 'wb').write(img)
-print('%s: stage-0 %d B  stage-1 %d B @0x%04X  app %d B @0x%04X  crc 0x%08X  meta @0x%04X -> %s (%d B)'
-      % (chip, len(s0), len(s1), STAGE1_BASE, len(app), APP_BASE, crc, META_OFF, out, len(img)))
+print('%s: stage-0 %d B  stage-1 %d B @0x%04X  app %d B @0x%04X  crc 0x%08X  type %s  meta @0x%04X -> %s (%d B)'
+      % (chip, len(s0), len(s1), STAGE1_BASE, len(app), APP_BASE, crc,
+         'blank' if mtype is None else '0x%02X' % mtype, META_OFF, out, len(img)))

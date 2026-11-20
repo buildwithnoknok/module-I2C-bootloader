@@ -41,6 +41,14 @@
  * layout, version). Layout 2 is a V003-only number, which keeps the other
  * families' images out (they use other layout ids). */
 
+/* ── Application header (DEV-21 / ADR-005, stage-1 1.3.0) ───────────────────
+ * Layout-2 apps from DEV-21 on carry 20 bytes {"NKA1", "V003", 2, version, type}
+ * at app base + BL_HDR_OFFSET. Stage-1 is TOLERANT here (unlike the X035): an
+ * image without the header installs as before, with module type 0. An image
+ * whose header names another chip or layout is refused (error 9). */
+#define BL_APP_TARGET      0x33303056U    /* "V003" little-endian               */
+#define BL_APP_HDR_TYPE    1              /* word 4 of the app header = type    */
+
 /* ── No-init RAM cells (top 16 B of RAM, reserved by every linker script) ──── */
 #define BL_RAM_CELLS       0x200007F0U
 
@@ -69,6 +77,30 @@ static inline void bl_led_set(uint8_t on)
     else    GPIOD->BSHR = (1 << 1);
 }
 #define BL_LED_TICKS       1000000U       /* SysTick (HCLK/8) ticks per toggle */
+
+/* ── Flashing Interface V3 (DEV-22, stage-1 1.3.0) ─────────────────────────────
+ * PD1 is SWIO: while SDI is on, GPIO writes to it do nothing. In FLASH MODE
+ * stage-1 leaves PD1 alone for BL_SWD_WINDOW_TICKS (~2 s, a plain SWD connect
+ * works), then disables SDI (AFIO PCFR1 SWCFG = 0b100, volatile: SDI is back at
+ * every power-up/reset) and drives the LED in per-state patterns.
+ * The I2C slave runs from the first moment; only the LED waits for the window.
+ * On the NORMAL BOOT path (valid app) stage-1 does NOT touch SDI or PD1: the
+ * app inherits SWD as today, and an app that wants the LED disables SDI itself.
+ * So a running product and every bench SWD tool keep working unchanged.
+ *
+ * Bench caveat: the regression scripts read flash over SWD while stage-1 sits in
+ * flash mode (i2c_regress.sh, run_swd_tests.sh). After the window that fails
+ * by design. A test build with -DBL_V3_OFF keeps the 1.2.0 LED behaviour (SDI
+ * never touched); the V3 behaviour itself is tested on the release build. */
+#if !defined(BL_V3_OFF)
+#define BL_SWD_WINDOW_TICKS 12000000U     /* 2 s at HCLK/8 = 6 MHz             */
+#endif
+#define BL_LED_SLOT_TICKS   600000U       /* 100 ms pattern slot               */
+static inline void bl_sdi_disable(void)
+{
+    RCC->APB2PCENR |= RCC_APB2Periph_AFIO;
+    AFIO->PCFR1 = (AFIO->PCFR1 & ~AFIO_PCFR1_SWCFG) | AFIO_PCFR1_SWCFG_DISABLE;
+}
 
 /* ── Watchdog armed before the app (stage-1 v1.2.0): LSI ~128 kHz / 64, reload
  *    4095 = ~2.05 s, the setting every layout-2 app uses. ─────────────────────── */

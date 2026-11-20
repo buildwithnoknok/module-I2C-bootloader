@@ -80,9 +80,10 @@ boot-attempt counters and the boot decision are **one shared core** (`stage0/nok
 | Control block / metadata | `0x3F80` / `0x3FC0` | `0xF400` / `0xF500` |
 | No-init RAM cells | `0x200007F0` | `0x20004FF0` |
 | Stage-1 header | base + `0x100`, 16 B | base + `0x200`, 20 B (+ target `X035`) |
-| App header required | no | yes: `NKA1`, target `X035`, layout 3 at app base + `0x200`, else VERIFY error **9** |
+| App header required | optional since 1.3.0: `NKA1`, target `V003`, layout 2, version, **type** (20 B) at app base + `0x100`; no header = installs with type 0; a header naming another chip/layout = VERIFY error **9** | yes: `NKA1`, target `X035`, layout 3 at app base + `0x200`, else VERIFY error **9** |
+| Module type for `0xB4` (metadata word 3) | from the app header (1.3.0) | fixed `0x07` (1.1.0) |
 | I²C pins | PC1/PC2 | PC16/PC17 (I2C1 remap), bus A of the PicoHub |
-| Status LED in flash mode | PD1, ~3 Hz | PB12 (D4), 1 Hz |
+| Status LED in flash mode | PD1: since 1.3.0 untouched for a ~2 s SWD window, then SDI disabled and per-state patterns (double blink = waiting, 1 Hz = transfer, 5 Hz = error); 1.2.0 ~3 Hz | PB12 (D4), 1 Hz |
 | Watchdog armed before the app | ~2 s (LSI /64, 4095) | ~2 s (46.9 kHz /64, 1465) |
 | Reset flags | stage-1 reads and clears them | stage-1 leaves them for the app (cold vs warm start); clears them only in flash mode |
 
@@ -129,6 +130,7 @@ in stage-0's halt state.
 | `0x06` VERIFY_STAGE1 | write | `[len(4 LE), crc32(4 LE)]` | **stage-1 only.** CRC-check the staged stage-1; on match, arm stage-0. |
 | `0xB1` GET_VERSION | write, then read | → `[proto, major, minor, patch, layout]` | **stage-1 only.** Bootloader version **+ flash layout id** (5th byte, since v1.2.0 — apps answer 4 bytes; a pre-1.2.0 stage-1 clocks out `0x00` there). |
 | `0xB3` GET_UID | write, then read | → 8-byte chip UID | **stage-1 only.** Same bytes/order as the enumeration reply — lets the Conductor identify a module parked here. |
+| `0xB4` GET_ID | write, then read | → `[UID x8][TYPE][CRC8]` | ADR-005, V003 stage-1 1.3.0 / X035 1.1.0 (apps answer it too, DEV-21). Exactly the 0x7F enumeration reply. TYPE = metadata word 3: written by VERIFY, kept across ERASE (only the type word is programmed back, the magic stays blank), so a module parked mid-update still says what it is. `0` = unknown (metadata from stage-1 <= 1.2.0 and an app without header, or a power cut in the ms between the last erase and the type write). |
 
 **A stage-1 update is the same transfer as an application update** — same `ERASE`, same
 `WRITE_CHUNK`, same staging area (the app region). Only the closing command differs:
@@ -152,7 +154,7 @@ Apps still answer 4 bytes. Reading 5 from a pre-1.2.0 stage-1 yields `0x00` as b
 not say". The legacy monolithic bootloader doesn't implement it, so
 **silence means "old world" and a reply means "stage-0/stage-1 module"**.
 
-**Error codes** (`READ_STATUS` byte 1): 1 bad chunk len · 2 bad verify len · 3 offset out of range · 4 verify len invalid · 5 CRC mismatch · 6 BOOT with no valid app · **7 app unhealthy** (stage-1 refused to boot an app that crashed three times; cleared by the next command) · **8 not a stage-1 image** (`VERIFY_STAGE1` header check failed).
+**Error codes** (`READ_STATUS` byte 1): 1 bad chunk len · 2 bad verify len · 3 offset out of range · 4 verify len invalid · 5 CRC mismatch · 6 BOOT with no valid app · **7 app unhealthy** (stage-1 refused to boot an app that crashed three times; cleared by the next command) · **8 not a stage-1 image** (`VERIFY_STAGE1` header check failed) · **9 wrong application** (app header names another chip or layout; X035: header missing).
 
 **The app is watched.** Stage-1 counts every boot of the application; the app clears the counter once its I2C address is assigned, and every noknok app runs the independent watchdog so a hang becomes a warm reset. **Since v1.2.0 stage-1 arms the IWDG itself (~2 s) before jumping**, so an app that dies *before* its own `iwdg_init()` — a wrongly-linked image, an early fault — is watchdog-reset and counted too, instead of hanging silently (the 12 Sep 2026 layout-mismatch incident). The IWDG cannot be stopped: every app must kick it, and its first kick must come within ~2 s of the jump (ours: < 300 ms). A valid-CRC app that crashes three times in a row (three consecutive **watchdog** resets — any other reset cause starts a fresh series) is parked here with error 7 instead of being booted forever, and the Conductor's `rescue_parked_module()` puts it right by UID (`0xB3`). Contract for app authors: `Ecosystem/software/bootloader-update.md` §3.
 
