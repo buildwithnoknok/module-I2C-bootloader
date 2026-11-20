@@ -13,5 +13,6 @@ brain-Pico `tools/pico.py run`.
 | `verify_buzzer_l2.py` | Pico | S-tier smoke after a restore: enumerate, list modules, read the Buzzer's stage-1 version (`0xB1`). |
 | `bench_stage1_buzzer.py` | Pico | Install a new stage-1 on the bench Buzzer through the running stage-1 (real OTA path), then verify. |
 | `probe_parked.py` | Pico | Talk to a module parked in its bootloader at `0x7E` (GET_VERSION, state). |
+| `probe_getid.py` | Pico | `0xB4` GET_ID x100 at `0x7E` (parked, vs `0xB3`) or at every enumerated module (vs its enumeration UID): CRC-8, UID, stable type. PASS/FAIL per address (DEV-21 / DEV-22). |
 | `inspect_l2.py FULL.bin` | host | Dump a 16 KB layout-2 image: region starts, every `B007C0DE` metadata block, region ends. |
 | `find_stages.py FULL.bin S0_DIR S1_DIR` | host | Which stage-0 / stage-1 `.bin` is inside a known-good full image. |
