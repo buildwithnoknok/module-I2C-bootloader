@@ -28,6 +28,7 @@ the bench runs and the L-tier regression pass (release build on the bench toolch
   boot path (valid app) does NOT touch SDI or PD1. Test builds: `-DBL_V3_OFF` keeps the old
   LED and never disables SDI (the regression scripts read flash over SWD in flash mode).
 - `mk_full.py` writes the type word into the metadata (from the app header; X035 0x07).
+- Bench 20 Nov 2026 (cellar rig, bench toolchain; main 1.2.0 / X035 1.0.0 rebuild byte-identical; release sizes V003 3504 B, X035 3672 B): identity 10/10, self-update 8/8, X035 8/8 PASS (`firmware/tools/bench/`). V3: SWD works while an app runs, fails after the window in flash mode, attaches inside the window after a power cut. Found: after an OTA (stage-1 sat in flash mode > 2 s) the app is started with SDI already off, so SWD needs a power cycle until the next power-up. LED patterns not yet checked by eye; M/L-tier scripts not run (they need the LED Button on the clamp).
 - Size (agent-hq gcc 14.2, ch32fun 95030fd, not the release toolchain): V003 3516 B of 4096
   (+520 B on that toolchain's 2996 B baseline), X035 3680 B of 4096 (+280 B). Breaking: no
   (layouts, `0xB1`, `0xB3` and the update protocol unchanged). Not tested on hardware yet.
