@@ -70,15 +70,23 @@ echo "LinkE, Pico (+ bench files), chip: ok"
 # image, vX.Y.2 = the Conductor
 # test's payload (it must differ from what is installed, or nothing is proven).
 echo "=== build ==="
-build_s1() {  # build_s1 <patch> <out.bin>   (run inside $S1)
+# Test builds carry -DBL_V3_OFF (DEV-22, stage-1 >= 1.3.0): the steps below read
+# flash over SWD while stage-1 sits in flash mode, which the V3 build blocks after
+# its ~2 s SWD window by design. noknok_stage1.bin (used by build_test_images.py
+# for the badapp/silentapp images, which SWD-read a parked module) is the V3_OFF
+# build too. Only the final RESTORE image is the real release build.
+# (Older sources simply ignore the define.)
+build_s1() {  # build_s1 <patch> <out.bin> [extra cflags]   (run inside $S1)
   make clean >/dev/null 2>&1
-  make build EXTRA_CFLAGS=-DS1_VERSION_PATCH=$1 >/tmp/build_s1.log 2>&1 || { tail -5 /tmp/build_s1.log; return 1; }
+  make build EXTRA_CFLAGS="-DS1_VERSION_PATCH=$1 $3" >/tmp/build_s1.log 2>&1 || { tail -5 /tmp/build_s1.log; return 1; }
   cp noknok_stage1.bin "$2"
 }
 ( cd $T/.. && make clean >/dev/null 2>&1 && make build >/tmp/build_s0.log 2>&1 \
     && ls -l noknok_stage0.bin | awk '{print "stage-0:", $5, "B"}' ) \
   || { tail -5 /tmp/build_s0.log; echo "FAIL: stage-0 build"; exit 2; }
-( cd $S1 && build_s1 0 s1_0400_v100.bin && build_s1 1 s1_0400_v101.bin && build_s1 2 s1_0400_v102.bin \
+( cd $S1 && build_s1 0 s1_0400_release.bin \
+    && build_s1 0 s1_0400_v100.bin -DBL_V3_OFF && build_s1 1 s1_0400_v101.bin -DBL_V3_OFF \
+    && build_s1 2 s1_0400_v102.bin -DBL_V3_OFF \
     && cp s1_0400_v100.bin noknok_stage1.bin \
     && ls -l s1_0400_v100.bin | awk '{print "stage-1:", $5, "B (built as patch 0 / 1 / 2 of the committed major.minor)"}' \
     ) || { echo "FAIL: stage-1 build"; exit 2; }
@@ -87,7 +95,7 @@ build_s1() {  # build_s1 <patch> <out.bin>   (run inside $S1)
   || { tail -5 /tmp/build_app.log; echo "FAIL: LED Button app build"; exit 2; }
 # restore image = the RELEASE stage-1 (patch 0 build = byte-identical to firmware/bin/noknok_stage1.bin), so the
 # board never ends the run on a test bootloader (DEV-231)
-python3 $T/mk_full.py $T/../noknok_stage0.bin $S1/s1_0400_v100.bin $APP/keyboard_firmware.bin $FULL || exit 2
+python3 $T/mk_full.py $T/../noknok_stage0.bin $S1/s1_0400_release.bin $APP/keyboard_firmware.bin $FULL || exit 2
 cp $APP/keyboard_firmware.bin $P/keyboard_firmware.bin
 ( cd $P && ./pico.py put keyboard_firmware.bin >/dev/null ) || { echo "FAIL: could not push the app to the Pico"; exit 2; }
 cp $S1/s1_0400_v101.bin $P/noknok_stage1_v101.bin
